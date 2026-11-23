@@ -38,8 +38,10 @@ import {
 } from "@/lib/db";
 import {
   DAY,
+  MIN,
   type PlanMode,
   type PlanResult,
+  blockMinutes,
   buildStudyTasks,
   isMissed,
   isOverdue,
@@ -58,6 +60,20 @@ import type {
   Subject,
   Task,
 } from "@/lib/types";
+
+/** Minutes of work to save, sent by the focus timer. */
+export type ProgressEntry = {
+  /** One id per timer round, so a round saved several times stays one entry. */
+  runId: string;
+  taskId: string | null;
+  blockId: string | null;
+  minutes: number;
+  kind: "focus" | "break";
+  /** Add the minutes to the task's progress (breaks can be left out in Settings). */
+  creditTask: boolean;
+  /** The timer stopped or finished, so tidy up the plan too. */
+  settle: boolean;
+};
 
 export type TaskInput = Pick<Task, "title" | "subjectId" | "kind" | "dueAt" | "estimateMin" | "priority"> & {
   notes?: string;
@@ -103,7 +119,11 @@ type PlannerState = {
   deleteClass: (id: string) => void;
 
   addTask: (input: TaskInput, opts?: { pin?: { start: number; end: number }; autoPlan?: boolean }) => { id: string; plan: PlanSummary | null };
-  updateTask: (id: string, patch: Partial<TaskInput>, opts?: { replan?: boolean }) => PlanSummary | null;
+  updateTask: (
+    id: string,
+    patch: Partial<TaskInput> & { loggedMin?: number },
+    opts?: { replan?: boolean; pin?: { start: number; end: number } },
+  ) => PlanSummary | null;
   completeTask: (id: string) => void;
   reopenTask: (id: string) => PlanSummary | null;
   deleteTask: (id: string) => void;
@@ -118,7 +138,7 @@ type PlannerState = {
   deleteExam: (id: string) => void;
   generateStudyPlan: (examId: string, examOverride?: Exam) => { tasks: number; plan: PlanSummary | null };
 
-  logFocus: (entry: { taskId: string | null; blockId: string | null; minutes: number }) => void;
+  addProgress: (entry: ProgressEntry) => void;
 
   autoSchedule: (mode?: PlanMode) => PlanSummary;
   rescheduleMissedWork: () => PlanSummary;
@@ -271,6 +291,19 @@ export function PlannerProvider({ user, children }: { user: User; children: Reac
     const plannedUnlockedIds = (taskId: string) =>
       stateRef.current.blocks.filter((b) => b.taskId === taskId && b.status === "planned" && !b.locked).map((b) => b.id);
 
+    /** Planned sessions of OTHER tasks that sit on top of a time you picked yourself. */
+    const overlapping = (start: number, end: number, exceptTaskId: string) =>
+      stateRef.current.blocks
+        .filter(
+          (b) =>
+            b.taskId !== exceptTaskId &&
+            b.status === "planned" &&
+            !b.locked &&
+            Date.parse(b.start) < end &&
+            Date.parse(b.end) > start,
+        )
+        .map((b) => b.id);
+
     const deleteTaskIds = (taskIds: string[]) => {
       const set = new Set(taskIds);
       const blockIds = stateRef.current.blocks.filter((b) => set.has(b.taskId)).map((b) => b.id);
@@ -336,16 +369,51 @@ export function PlannerProvider({ user, children }: { user: User; children: Reac
         const plan =
           opts?.autoPlan === false
             ? null
-            : replan("incremental", { tasks: [...s.tasks, task], blocks: [...s.blocks, ...extraBlocks] });
+            : replan("incremental", {
+                tasks: [...s.tasks, task],
+                blocks: [...s.blocks, ...extraBlocks],
+                // Other sessions that sit on the time you picked are moved elsewhere.
+                dropIds: opts?.pin ? overlapping(opts.pin.start, opts.pin.end, id) : [],
+              });
         return { id, plan };
       },
 
-      updateTask: (id: string, patch: Partial<TaskInput>, opts?: { replan?: boolean }) => {
+      // `pin` = a time you prefer for this task. Sessions the planner placed are re-planned around it.
+      updateTask: (
+        id: string,
+        patch: Partial<TaskInput> & { loggedMin?: number },
+        opts?: { replan?: boolean; pin?: { start: number; end: number } },
+      ) => {
         const s = stateRef.current;
+        const current = s.tasks.find((t) => t.id === id);
+        if (!current) return null;
         patchDoc<Task>(uid, "tasks", id, patch);
-        if (!opts?.replan) return null;
-        const next = s.tasks.map((t) => (t.id === id ? { ...t, ...patch } : t));
-        return replan("incremental", { tasks: next, dropIds: plannedUnlockedIds(id) });
+        if (!opts?.replan && !opts?.pin) return null;
+
+        const updated: Task = { ...current, ...patch };
+        const nextTasks = s.tasks.map((t) => (t.id === id ? updated : t));
+        const dropIds = new Set(plannedUnlockedIds(id));
+        const extra: Block[] = [];
+
+        if (opts.pin && opts.pin.end > opts.pin.start) {
+          const pinMin = Math.round((opts.pin.end - opts.pin.start) / MIN);
+          const fixed = s.blocks.filter(
+            (b) => b.taskId === id && b.status === "planned" && b.locked && Date.parse(b.end) > Date.now(),
+          );
+          const fixedMin = fixed.reduce((sum, b) => sum + blockMinutes(b), 0);
+          // The new preferred time replaces earlier fixed times when together they would be more than the time left.
+          if (fixedMin + pinMin > remainingMinutes(updated, s.blocks)) for (const b of fixed) dropIds.add(b.id);
+          for (const other of overlapping(opts.pin.start, opts.pin.end, id)) dropIds.add(other);
+          const block: Omit<Block, "id"> = {
+            taskId: id,
+            start: new Date(opts.pin.start).toISOString(),
+            end: new Date(opts.pin.end).toISOString(),
+            status: "planned",
+            locked: true,
+          };
+          extra.push({ ...block, id: createDoc<Block>(uid, "blocks", block) });
+        }
+        return replan("incremental", { tasks: nextTasks, blocks: [...s.blocks, ...extra], dropIds: Array.from(dropIds) });
       },
 
       completeTask,
@@ -364,16 +432,26 @@ export function PlannerProvider({ user, children }: { user: User; children: Reac
         const s = stateRef.current;
         const block = s.blocks.find((b) => b.id === blockId);
         if (!block) return;
-        const nextStatus = block.status === "done" ? "planned" : "done";
-        patchDoc<Block>(uid, "blocks", blockId, { status: nextStatus });
-        if (nextStatus === "done") {
-          const task = s.tasks.find((t) => t.id === block.taskId);
-          if (task && task.status === "todo") {
-            const after = s.blocks.map((b) => (b.id === blockId ? { ...b, status: "done" as const } : b));
-            if (remainingMinutes(task, after) <= 0) {
-              completeTask(task.id);
-              toaster.create({ type: "success", title: "Task finished", description: `"${task.title}" is complete. Nice work!` });
-            }
+        const task = s.tasks.find((t) => t.id === block.taskId);
+
+        if (block.status === "done") {
+          // Undo: take back only the minutes that ticking added. Time you really focused stays counted.
+          const back = block.creditedMin || 0;
+          patchDoc<Block>(uid, "blocks", blockId, { status: "planned", creditedMin: 0 });
+          if (task && back > 0) patchDoc<Task>(uid, "tasks", task.id, { loggedMin: increment(-back) as unknown as number });
+          return;
+        }
+
+        // Ticking a session counts the part of it you did not already work with the timer.
+        const credit = Math.max(0, blockMinutes(block) - (block.focusedMin || 0));
+        patchDoc<Block>(uid, "blocks", blockId, { status: "done", creditedMin: credit });
+        if (!task) return;
+        if (credit > 0) patchDoc<Task>(uid, "tasks", task.id, { loggedMin: increment(credit) as unknown as number });
+        if (task.status === "todo") {
+          const after = s.blocks.map((b) => (b.id === blockId ? { ...b, status: "done" as const, creditedMin: credit } : b));
+          if (remainingMinutes({ ...task, loggedMin: (task.loggedMin || 0) + credit }, after) <= 0) {
+            completeTask(task.id);
+            toaster.create({ type: "success", title: "Task finished", description: `"${task.title}" is complete. Nice work!` });
           }
         }
       },
@@ -427,13 +505,50 @@ export function PlannerProvider({ user, children }: { user: User; children: Reac
         return { tasks: created.length, plan };
       },
 
-      // Focus timer
-      logFocus: (entry: { taskId: string | null; blockId: string | null; minutes: number }) => {
-        createDoc<FocusLog>(uid, "focusLogs", { ...entry, at: new Date().toISOString() });
-        // Focus time that is not tied to a planned session counts toward the task directly.
-        if (entry.taskId && !entry.blockId) {
-          patchDoc<Task>(uid, "tasks", entry.taskId, { loggedMin: increment(entry.minutes) as unknown as number });
+      // Focus timer: saves the minutes you worked (called every minute and when the timer stops).
+      addProgress: (p: ProgressEntry) => {
+        const s = stateRef.current;
+
+        if (p.minutes > 0) {
+          // One log per timer round: later saves of the same round add to it.
+          setDoc(
+            docRef(uid, "focusLogs", p.runId),
+            { taskId: p.taskId, blockId: p.blockId, kind: p.kind, at: new Date().toISOString(), minutes: increment(p.minutes) },
+            { merge: true },
+          ).catch((e) => console.error(e));
         }
+
+        const task = p.taskId ? s.tasks.find((t) => t.id === p.taskId) : undefined;
+        if (!task || !p.creditTask) return;
+
+        let blocksAfter = s.blocks;
+        if (p.minutes > 0) {
+          patchDoc<Task>(uid, "tasks", task.id, { loggedMin: increment(p.minutes) as unknown as number });
+          const block = p.blockId ? s.blocks.find((b) => b.id === p.blockId && b.taskId === task.id) : undefined;
+          if (block) {
+            const focused = (block.focusedMin || 0) + p.minutes;
+            // A planned session that has been fully worked is finished by itself.
+            const finished = block.status === "planned" && focused >= blockMinutes(block);
+            const extra = finished ? { status: "done" as const, creditedMin: 0 } : {};
+            patchDoc<Block>(uid, "blocks", block.id, { focusedMin: increment(p.minutes) as unknown as number, ...extra });
+            blocksAfter = s.blocks.map((b) => (b.id === block.id ? { ...b, focusedMin: focused, ...extra } : b));
+          }
+        }
+
+        if (!p.settle) return;
+
+        // The timer stopped: shorten or remove future sessions that are no longer needed.
+        const updated: Task = { ...task, loggedMin: (task.loggedMin || 0) + p.minutes };
+        if (task.status === "todo" && remainingMinutes(updated, blocksAfter) <= 0) {
+          toaster.create({
+            type: "success",
+            title: "You reached your time estimate",
+            description: `"${task.title}" has all the time you planned for it.`,
+            duration: 12000,
+            action: { label: "Mark done", onClick: () => completeTask(task.id) },
+          });
+        }
+        replan("trim", { tasks: s.tasks.map((t) => (t.id === task.id ? updated : t)), blocks: blocksAfter });
       },
 
       // Scheduling

@@ -5,8 +5,11 @@
 import assert from "node:assert/strict";
 import { defaultSettings } from "../config/defaults";
 import type { Block, ClassSession, Exam, Subject, Task } from "../lib/types";
+import { formatDurationShort, parseDuration } from "../lib/duration";
 import {
   MIN,
+  plannedMinutes,
+  remainingMinutes,
   atTime,
   buildStudyTasks,
   classIntervals,
@@ -177,6 +180,86 @@ for (const strategy of ["balanced", "early"] as const) {
   assert.deepEqual([...dues].sort((a, b) => a - b), dues, "deadlines increase");
   assert.ok(dues[dues.length - 1] < Date.parse(exam.startsAt), "everything is due before the exam");
   console.log(`✓ study plan: ${drafts.length} tasks, ${total} min`);
+}
+
+// ── 7. Work already done shrinks the plan ──────────────────────────────────────────────
+{
+  const t = task({ id: "p", title: "Report", subjectId: "phy", dueAt: iso(at(5, "23:00")), estimateMin: 180 });
+  const first = planSchedule({ now, mode: "full", settings, subjects, classes, tasks: [t], blocks: [] });
+  const blocks = toBlocks(first.create);
+  assert.equal(plannedMinutes("p", blocks), 180);
+
+  // 100 minutes worked with the timer → only 80 should stay planned.
+  const worked = { ...t, loggedMin: 100 };
+  const trim = planSchedule({ now, mode: "trim", settings, subjects, classes, tasks: [worked], blocks });
+  const after = [...blocks.filter((b) => !trim.removeIds.includes(b.id)), ...toBlocks(trim.create)];
+  assert.equal(plannedMinutes("p", after), 80, "planned time follows the remaining time");
+  assert.equal(trim.unscheduled.length, 0);
+  for (const b of trim.create) assert.ok(blocks.some((o) => o.start === b.start), "shortened sessions keep their start time");
+  checkNoClashes(after);
+
+  // Everything worked → nothing left planned.
+  const all = planSchedule({ now, mode: "trim", settings, subjects, classes, tasks: [{ ...t, loggedMin: 180 }], blocks });
+  assert.equal(plannedMinutes("p", [...blocks.filter((b) => !all.removeIds.includes(b.id)), ...toBlocks(all.create)]), 0);
+
+  // Trim mode never touches missed sessions (the person reschedules those on purpose).
+  const later = now + 2 * 24 * 60 * MIN;
+  const keepMissed = planSchedule({ now: later, mode: "trim", settings, subjects, classes, tasks: [t], blocks });
+  const missedIds = blocks.filter((b) => Date.parse(b.end) <= later).map((b) => b.id);
+  assert.ok(missedIds.every((id) => !keepMissed.removeIds.includes(id)), "trim leaves missed sessions alone");
+  console.log("✓ trim: planned time follows progress, missed sessions untouched");
+}
+
+// ── 8. Partly worked sessions and how progress is counted ──────────────────────────────
+{
+  const t = task({ id: "q", title: "Essay", dueAt: iso(at(4, "20:00")), estimateMin: 60, loggedMin: 45 });
+  const part: Block = { id: "pb", taskId: "q", start: iso(at(1, "20:00")), end: iso(at(1, "21:00")), status: "planned", locked: false, focusedMin: 20 };
+  assert.equal(plannedMinutes("q", [part]), 40, "worked minutes inside a session are not planned twice");
+  assert.equal(remainingMinutes(t, [part]), 15);
+
+  // A session ticked in the new version counts through loggedMin only (no double counting) …
+  const tickedNew: Block = { ...part, status: "done", creditedMin: 40 };
+  assert.equal(remainingMinutes({ ...t, loggedMin: 60 }, [tickedNew]), 0);
+  // … while a session ticked in the first version (no creditedMin) still counts, so old data keeps working.
+  const tickedOld: Block = { id: "ob", taskId: "q", start: part.start, end: part.end, status: "done", locked: false };
+  assert.equal(remainingMinutes({ ...t, loggedMin: 0 }, [tickedOld]), 0);
+
+  // 12 minute tasks (not a multiple of 5) are planned without trouble.
+  const small = task({ id: "s", title: "Quick reading", dueAt: iso(at(2, "20:00")), estimateMin: 12 });
+  const plan = planSchedule({ now, mode: "full", settings, subjects, classes, tasks: [small], blocks: [] });
+  assert.equal(plan.unscheduled.length, 0);
+  const planned = plan.create.reduce((s, b) => s + minutes(b), 0);
+  assert.ok(planned >= 12 && planned <= 15, `12 minute task planned as ${planned} min`);
+  // Planning again must not shorten it (rounding is ignored).
+  const again = planSchedule({ now, mode: "trim", settings, subjects, classes, tasks: [small], blocks: toBlocks(plan.create) });
+  assert.equal(again.removeIds.length, 0);
+  console.log("✓ progress: partial sessions, old data and 12-minute tasks all work");
+}
+
+// ── 9. A preferred time replaces the planner's sessions ────────────────────────────────
+{
+  const t = task({ id: "r", title: "Lab prep", subjectId: "cs", dueAt: iso(at(4, "23:00")), estimateMin: 60 });
+  const first = toBlocks(planSchedule({ now, mode: "full", settings, subjects, classes, tasks: [t], blocks: [] }).create);
+  const pinned: Block = { id: "mine", taskId: "r", start: iso(at(2, "20:00")), end: iso(at(2, "21:00")), status: "planned", locked: true };
+  // The page drops the old unlocked sessions and adds the pinned one; the planner fills in whatever is left.
+  const plan = planSchedule({ now, mode: "incremental", settings, subjects, classes, tasks: [t], blocks: [pinned] });
+  assert.equal(plan.create.length, 0, "a 1 hour preferred time covers a 1 hour task completely");
+  assert.ok(first.length > 0);
+  const half: Block = { ...pinned, end: iso(at(2, "20:30")) };
+  const rest = planSchedule({ now, mode: "incremental", settings, subjects, classes, tasks: [t], blocks: [half] });
+  assert.equal(rest.create.reduce((s, b) => s + minutes(b), 0), 30, "a shorter preferred time leaves the rest to the planner");
+  console.log("✓ preferred time: covers the task or leaves the remainder to the planner");
+}
+
+// ── 10. Typed durations ────────────────────────────────────────────────────────────────
+{
+  const cases: [string, number | null][] = [
+    ["12", 12], ["45m", 45], ["45 min", 45], ["1h", 60], ["1.5h", 90], ["1h30", 90], ["1h 30m", 90],
+    ["1:30", 90], ["2 hours 15 minutes", 135], ["2,5h", 150], ["", null], ["abc", null], ["0", null],
+  ];
+  for (const [text, want] of cases) assert.equal(parseDuration(text), want, `parseDuration("${text}")`);
+  assert.equal(parseDuration(formatDurationShort(75)), 75);
+  console.log("✓ typed durations understood");
 }
 
 console.log("\nAll scheduler checks passed.");

@@ -51,7 +51,7 @@ export type Task = {
   dueAt: string;
   /** Your estimate of the TOTAL time needed, in minutes. */
   estimateMin: number;
-  /** Minutes you worked on it with the focus timer (outside planned sessions). */
+  /** Everything you have worked on it so far, in minutes (focus timer, breaks, sessions you ticked, manual edits). */
   loggedMin: number;
   priority: Priority;
   status: "todo" | "done";
@@ -71,6 +71,10 @@ export type Block = {
   status: "planned" | "done";
   /** Locked = you picked this time yourself, so auto-scheduling never moves it. */
   locked: boolean;
+  /** Minutes worked inside this session with the timer (already added to the task's loggedMin). */
+  focusedMin?: number;
+  /** Minutes added to the task's loggedMin when you ticked this session as done by hand. */
+  creditedMin?: number;
 };
 
 export type Exam = {
@@ -126,6 +130,10 @@ export type Settings = {
     shortBreakMin: number;
     longBreakMin: number;
     cyclesBeforeLong: number;
+    /** Time spent on breaks also counts toward the task's progress. */
+    countBreaks: boolean;
+    /** Start the next focus round or break automatically. */
+    autoStart: boolean;
   };
   notifications: {
     enabled: boolean;
@@ -146,6 +154,8 @@ export type FocusLog = {
   taskId: string | null;
   blockId: string | null;
   minutes: number;
+  /** Older entries have no kind and are focus time. */
+  kind?: "focus" | "break";
   at: string; // ISO
 };
 

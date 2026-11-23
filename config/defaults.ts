@@ -46,6 +46,8 @@ export function defaultSettings(timezone = "Asia/Kuala_Lumpur"): Settings {
       shortBreakMin: 5,
       longBreakMin: 15,
       cyclesBeforeLong: 4,
+      countBreaks: true,
+      autoStart: false,
     },
     notifications: {
       enabled: false,

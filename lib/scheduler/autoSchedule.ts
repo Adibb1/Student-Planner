@@ -12,7 +12,7 @@
 
 import type { Block, ClassSession, Settings, Subject, Task } from "../types";
 import { type FreeSlot, freeSlotsForDay } from "./freeTime";
-import { plannedMinutes, remainingMinutes } from "./progress";
+import { blockMinutes, plannedMinutes, remainingMinutes } from "./progress";
 import {
   DAY,
   type Interval,
@@ -24,13 +24,14 @@ import {
   subtractIntervals,
 } from "./time";
 
-export type PlanMode = "incremental" | "full";
+export type PlanMode = "incremental" | "full" | "trim";
 
 export type PlanInput = {
   now: number;
   /**
    * "incremental": keep sessions that are still in the future, only place what is missing.
    * "full": throw away every unlocked, unfinished session and plan from scratch.
+   * "trim": only remove or shorten future sessions that are no longer needed (work already done).
    */
   mode: PlanMode;
   settings: Settings;
@@ -121,13 +122,50 @@ export function planSchedule(input: PlanInput): PlanResult {
     } else if (!todoIds.has(b.taskId)) {
       removeIds.push(b.id); // belongs to a finished or deleted task
     } else if (Date.parse(b.end) <= now) {
-      removeIds.push(b.id); // missed → its minutes go back to "still to do"
-    } else if (b.locked || mode === "incremental") {
+      // missed → its minutes go back to "still to do" (trim mode leaves it for you to reschedule)
+      if (mode === "trim") keep.push(b);
+      else removeIds.push(b.id);
+    } else if (b.locked || mode !== "full") {
       keep.push(b);
     } else {
       removeIds.push(b.id);
     }
   }
+
+  // ── 1b. Shorten or drop future sessions that are no longer needed (you already did the work) ──
+  const pendingCreate: NewBlock[] = [];
+  for (const t of todo) {
+    const ahead = keep.filter((b) => Date.parse(b.end) > now || b.status === "done");
+    let excess = plannedMinutes(t.id, ahead) - remainingMinutes(t, keep);
+    if (excess < 5) continue; // ignore rounding differences
+    const latestFirst = keep
+      .filter((b) => b.taskId === t.id && b.status === "planned" && !b.locked && Date.parse(b.start) > now)
+      .sort((a, b) => Date.parse(b.start) - Date.parse(a.start));
+    for (const b of latestFirst) {
+      if (excess < 5) break;
+      const len = blockMinutes(b);
+      keep.splice(keep.indexOf(b), 1);
+      removeIds.push(b.id);
+      if (len <= excess) {
+        excess -= len;
+        continue;
+      }
+      const newLen = Math.floor((len - excess) / 5) * 5;
+      excess = 0;
+      if (newLen >= 10) {
+        const shorter: NewBlock = {
+          taskId: t.id,
+          start: b.start,
+          end: new Date(Date.parse(b.start) + newLen * MIN).toISOString(),
+          status: "planned",
+          locked: false,
+        };
+        pendingCreate.push(shorter);
+        keep.push({ ...shorter, id: `trim-${b.id}` });
+      }
+    }
+  }
+  if (mode === "trim") return { create: pendingCreate, removeIds, unscheduled: [], warnings };
 
   // ── 2. What is still left for each task ──────────────────────────────────────────────
   const deadlineOf = (t: Task) => {
@@ -150,7 +188,7 @@ export function planSchedule(input: PlanInput): PlanResult {
       return priorityWeight[a.task.priority] - priorityWeight[b.task.priority];
     });
 
-  const result: PlanResult = { create: [], removeIds, unscheduled: [], warnings };
+  const result: PlanResult = { create: pendingCreate, removeIds, unscheduled: [], warnings };
   if (work.length === 0) return result;
 
   // ── 3. Free time, day by day (computed when first needed) ───────────────────────────

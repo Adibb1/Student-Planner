@@ -132,6 +132,7 @@ export function TaskCard({ task, onEdit }: { task: Task; onEdit: (task: Task) =>
                         </Text>
                         <Text fontSize="xs" color={missed ? "red.500" : "fg.muted"}>
                           {fmtDuration(blockMinutes(b))}
+                          {b.focusedMin ? ` · ${fmtDuration(b.focusedMin)} worked` : ""}
                           {missed ? " · missed" : ""}
                           {b.locked ? " · fixed time" : ""}
                         </Text>

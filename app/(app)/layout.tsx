@@ -8,6 +8,7 @@ import { Navbar } from "@/components/Navbar";
 import { PushListener } from "@/components/PushListener";
 import { SetupNotice } from "@/components/SetupNotice";
 import { useAuth } from "@/context/AuthContext";
+import { FocusProvider } from "@/context/FocusContext";
 import { PlannerProvider } from "@/context/PlannerContext";
 
 // Every page inside the (app) folder needs you to be signed in.
@@ -24,9 +25,12 @@ export default function AppLayout({ children }: { children: ReactNode }) {
 
   return (
     <PlannerProvider user={user}>
-      <Navbar />
-      <PushListener />
-      <Box as="main">{children}</Box>
+      {/* The focus timer lives here so it keeps running when you open other pages. */}
+      <FocusProvider>
+        <Navbar />
+        <PushListener />
+        <Box as="main">{children}</Box>
+      </FocusProvider>
     </PlannerProvider>
   );
 }

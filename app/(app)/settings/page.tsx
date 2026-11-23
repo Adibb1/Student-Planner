@@ -312,6 +312,16 @@ function SettingsForm() {
             <NumField label="Long break" value={s.pomodoro.longBreakMin} min={5} max={60} onChange={(n) => set("pomodoro", { longBreakMin: n })} />
             <NumField label="Rounds before a long break" value={s.pomodoro.cyclesBeforeLong} min={2} max={8} step={1} unit="rounds" onChange={(n) => set("pomodoro", { cyclesBeforeLong: n })} />
           </Box>
+          <Switch.Root colorPalette="teal" checked={s.pomodoro.countBreaks} onCheckedChange={(e) => set("pomodoro", { countBreaks: e.checked })}>
+            <Switch.HiddenInput />
+            <Switch.Control />
+            <Switch.Label>Count break time toward the task's progress</Switch.Label>
+          </Switch.Root>
+          <Switch.Root colorPalette="teal" checked={s.pomodoro.autoStart} onCheckedChange={(e) => set("pomodoro", { autoStart: e.checked })}>
+            <Switch.HiddenInput />
+            <Switch.Control />
+            <Switch.Label>Start the next round or break automatically</Switch.Label>
+          </Switch.Root>
         </SectionCard>
 
         {/* Notifications */}

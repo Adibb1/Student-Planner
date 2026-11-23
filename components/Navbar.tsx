@@ -15,10 +15,11 @@ import {
 import NextLink from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { LuLogOut, LuMenu, LuX } from "react-icons/lu";
+import { LuLogOut, LuMenu, LuTimer, LuX } from "react-icons/lu";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { nav, site } from "@/config/site";
 import { useAuth } from "@/context/AuthContext";
+import { formatClock, useFocus } from "@/context/FocusContext";
 import { usePlanner } from "@/context/PlannerContext";
 
 export function Navbar() {
@@ -26,6 +27,7 @@ export function Navbar() {
   const pathname = usePathname();
   const { user, signOut } = useAuth();
   const { alerts } = usePlanner();
+  const focus = useFocus();
   const attention = alerts.missed.length + alerts.overdue.length;
 
   // Close the phone/tablet menu when the page changes, with Escape, or on a wide screen.
@@ -105,6 +107,23 @@ export function Navbar() {
                 </Button>
               ))}
             </HStack>
+
+            {/* Shows while a focus timer is running or paused, on every page */}
+            {focus.active && (
+              <Button asChild size="sm" variant="subtle" colorPalette={focus.mode === "focus" ? "teal" : "green"}>
+                <NextLink href="/focus" aria-label="Open the focus timer">
+                  <LuTimer />
+                  <Text as="span" fontVariantNumeric="tabular-nums">
+                    {formatClock(focus.remainingMs)}
+                  </Text>
+                  {!focus.running && (
+                    <Text as="span" fontSize="xs" display={{ base: "none", sm: "inline" }}>
+                      paused
+                    </Text>
+                  )}
+                </NextLink>
+              </Button>
+            )}
 
             <ThemeToggle />
 
