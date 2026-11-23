@@ -37,7 +37,9 @@ function localParts(ms: number, timeZone: string) {
   const minute = Number(get("minute"));
   return {
     date: `${get("year")}-${get("month")}-${get("day")}`,
-    weekday: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(get("weekday")) as Weekday,
+    weekday: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(
+      get("weekday"),
+    ) as Weekday,
     hour,
     minute,
     minutes: hour * 60 + minute,
@@ -50,11 +52,18 @@ const hhmm = (s: string) => {
 };
 
 const timeLabel = (iso: string, timeZone: string) =>
-  new Intl.DateTimeFormat("en-GB", { timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(
-    new Date(iso),
-  );
+  new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(new Date(iso));
 
-async function collect(db: Firestore, uid: string, now: number): Promise<{ reminders: Reminder[]; tokens: { id: string; token: string }[] }> {
+async function collect(
+  db: Firestore,
+  uid: string,
+  now: number,
+): Promise<{ reminders: Reminder[]; tokens: { id: string; token: string }[] }> {
   const userRef = db.collection("users").doc(uid);
   const userSnap = await userRef.get();
   const user = userSnap.data() as DocumentData | undefined;
@@ -63,7 +72,9 @@ async function collect(db: Firestore, uid: string, now: number): Promise<{ remin
   if (!n.enabled) return { reminders: [], tokens: [] };
 
   const devices = await userRef.collection("devices").get();
-  const tokens = devices.docs.map((d) => ({ id: d.id, token: String(d.get("token") || "") })).filter((d) => d.token);
+  const tokens = devices.docs
+    .map((d) => ({ id: d.id, token: String(d.get("token") || "") }))
+    .filter((d) => d.token);
   if (tokens.length === 0) return { reminders: [], tokens: [] };
 
   const tz = settings.timezone || "Asia/Kuala_Lumpur";
@@ -74,8 +85,12 @@ async function collect(db: Firestore, uid: string, now: number): Promise<{ remin
     userRef.collection("tasks").where("status", "==", "todo").get(),
     userRef.collection("exams").get(),
   ]);
-  const subjectName = new Map(subjectsSnap.docs.map((d) => [d.id, String(d.get("name") || "Class")]));
-  const tasks = tasksSnap.docs.map((d) => ({ id: d.id, ...(d.data() as DocumentData) }));
+  const subjectName = new Map(
+    subjectsSnap.docs.map((d) => [d.id, String(d.get("name") || "Class")]),
+  );
+  const tasks = tasksSnap.docs.map(
+    (d) => ({ id: d.id, ...d.data() }) as DocumentData & { id: string },
+  );
   const taskTitle = new Map(tasks.map((t) => [t.id, String(t.title)]));
   const reminders: Reminder[] = [];
 
@@ -97,7 +112,11 @@ async function collect(db: Firestore, uid: string, now: number): Promise<{ remin
   // Planned study sessions starting soon
   const nowIso = new Date(now).toISOString();
   const soonIso = new Date(now + n.sessionLeadMin * MIN).toISOString();
-  const soonBlocks = await userRef.collection("blocks").where("start", ">", nowIso).where("start", "<=", soonIso).get();
+  const soonBlocks = await userRef
+    .collection("blocks")
+    .where("start", ">", nowIso)
+    .where("start", "<=", soonIso)
+    .get();
   for (const d of soonBlocks.docs) {
     const b = d.data();
     if (b.status !== "planned" || !taskTitle.has(b.taskId)) continue;
@@ -116,9 +135,19 @@ async function collect(db: Firestore, uid: string, now: number): Promise<{ remin
       if (!Number.isFinite(due)) continue;
       const left = due - now;
       if (left > 0 && left <= 3 * HOUR) {
-        reminders.push({ key: `due3:${t.id}`, title: `Due in under 3 hours`, body: String(t.title), link: "/tasks" });
+        reminders.push({
+          key: `due3:${t.id}`,
+          title: `Due in under 3 hours`,
+          body: String(t.title),
+          link: "/tasks",
+        });
       } else if (left > 3 * HOUR && left <= 24 * HOUR) {
-        reminders.push({ key: `due24:${t.id}`, title: `Due within 24 hours`, body: String(t.title), link: "/tasks" });
+        reminders.push({
+          key: `due24:${t.id}`,
+          title: `Due within 24 hours`,
+          body: String(t.title),
+          link: "/tasks",
+        });
       } else if (left <= 0 && left > -12 * HOUR) {
         reminders.push({
           key: `overdue:${t.id}`,
@@ -132,9 +161,19 @@ async function collect(db: Firestore, uid: string, now: number): Promise<{ remin
       const starts = Date.parse(String(d.get("startsAt")));
       const left = starts - now;
       if (left > 0 && left <= 24 * HOUR) {
-        reminders.push({ key: `exam1:${d.id}`, title: `Exam tomorrow: ${d.get("title")}`, body: `Starts at ${timeLabel(d.get("startsAt"), tz)}. Good luck!`, link: "/exams" });
+        reminders.push({
+          key: `exam1:${d.id}`,
+          title: `Exam tomorrow: ${d.get("title")}`,
+          body: `Starts at ${timeLabel(d.get("startsAt"), tz)}. Good luck!`,
+          link: "/exams",
+        });
       } else if (left > 24 * HOUR && left <= 72 * HOUR) {
-        reminders.push({ key: `exam3:${d.id}`, title: `Exam in 3 days: ${d.get("title")}`, body: "Check your study plan.", link: "/exams" });
+        reminders.push({
+          key: `exam3:${d.id}`,
+          title: `Exam in 3 days: ${d.get("title")}`,
+          body: "Check your study plan.",
+          link: "/exams",
+        });
       }
     }
   }
@@ -147,16 +186,24 @@ async function collect(db: Firestore, uid: string, now: number): Promise<{ remin
       .where("start", "<=", new Date(now + 20 * HOUR).toISOString())
       .get();
     const sessionsToday = dayBlocks.docs.filter(
-      (d) => d.get("status") === "planned" && localParts(Date.parse(d.get("start")), tz).date === local.date,
+      (d) =>
+        d.get("status") === "planned" &&
+        localParts(Date.parse(d.get("start")), tz).date === local.date,
     ).length;
-    const classesToday = classesSnap.docs.filter((d) => d.get("day") === local.weekday).length;
-    const dueToday = tasks.filter((t) => localParts(Date.parse(String(t.dueAt)), tz).date === local.date).length;
+    const classesToday = classesSnap.docs.filter(
+      (d) => d.get("day") === local.weekday,
+    ).length;
+    const dueToday = tasks.filter(
+      (t) => localParts(Date.parse(String(t.dueAt)), tz).date === local.date,
+    ).length;
     const missedSnap = await userRef
       .collection("blocks")
       .where("end", "<", nowIso)
       .where("end", ">", new Date(now - 7 * 24 * HOUR).toISOString())
       .get();
-    const missed = missedSnap.docs.filter((d) => d.get("status") === "planned" && taskTitle.has(d.get("taskId"))).length;
+    const missed = missedSnap.docs.filter(
+      (d) => d.get("status") === "planned" && taskTitle.has(d.get("taskId")),
+    ).length;
 
     const parts = [
       `${classesToday} class${classesToday === 1 ? "" : "es"}`,
@@ -174,9 +221,14 @@ async function collect(db: Firestore, uid: string, now: number): Promise<{ remin
   return { reminders, tokens };
 }
 
-export async function runReminders(now = Date.now()): Promise<{ users: number; sent: number }> {
+export async function runReminders(
+  now = Date.now(),
+): Promise<{ users: number; sent: number }> {
   const db = adminDb();
-  const users = await db.collection("users").where("notifyEnabled", "==", true).get();
+  const users = await db
+    .collection("users")
+    .where("notifyEnabled", "==", true)
+    .get();
   const appUrl = (process.env.NEXT_PUBLIC_APP_URL || "").replace(/\/$/, "");
   let sent = 0;
 
@@ -186,7 +238,10 @@ export async function runReminders(now = Date.now()): Promise<{ users: number; s
       for (const r of reminders) {
         // create() fails if the key already exists → this reminder was already sent.
         try {
-          await u.ref.collection("notifLog").doc(r.key).create({ at: new Date(now).toISOString() });
+          await u.ref
+            .collection("notifLog")
+            .doc(r.key)
+            .create({ at: new Date(now).toISOString() });
         } catch (err) {
           if ((err as { code?: number }).code === 6) continue;
           throw err;
@@ -196,7 +251,9 @@ export async function runReminders(now = Date.now()): Promise<{ users: number; s
           tokens: tokens.map((t) => t.token),
           notification: { title: r.title, body: r.body },
           data: { url: r.link },
-          webpush: appUrl ? { fcmOptions: { link: `${appUrl}${r.link}` } } : undefined,
+          webpush: appUrl
+            ? { fcmOptions: { link: `${appUrl}${r.link}` } }
+            : undefined,
         });
         sent += res.successCount;
 
@@ -204,7 +261,10 @@ export async function runReminders(now = Date.now()): Promise<{ users: number; s
         await Promise.all(
           res.responses.map(async (resp, i) => {
             const code = resp.error?.code;
-            if (code === "messaging/registration-token-not-registered" || code === "messaging/invalid-registration-token") {
+            if (
+              code === "messaging/registration-token-not-registered" ||
+              code === "messaging/invalid-registration-token"
+            ) {
               await u.ref.collection("devices").doc(tokens[i].id).delete();
             }
           }),
