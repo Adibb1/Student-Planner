@@ -7,15 +7,7 @@
 // Pages never talk to Firestore directly, they only use usePlanner().
 
 import type { User } from "firebase/auth";
-import {
-  type WriteBatch,
-  increment,
-  limit,
-  onSnapshot,
-  orderBy,
-  query,
-  setDoc,
-} from "firebase/firestore";
+import { type WriteBatch, increment, limit, onSnapshot, orderBy, query, setDoc } from "firebase/firestore";
 import {
   type ReactNode,
   createContext,
@@ -85,12 +77,10 @@ export type ProgressEntry = {
   settle: boolean;
 };
 
-export type TaskInput = Pick<
-  Task,
-  "title" | "subjectId" | "kind" | "dueAt" | "estimateMin" | "priority"
-> & {
-  notes?: string;
-};
+export type TaskInput = Pick<Task, "title" | "subjectId" | "kind" | "dueAt" | "estimateMin" | "priority"> &
+  Partial<Pick<Task, "startAfter" | "window" | "hardDueAt" | "allowOvertime">> & {
+    notes?: string;
+  };
 
 export type PlanSummary = {
   placed: number;
@@ -105,12 +95,7 @@ export type PlanSummary = {
 export type StudyPreview = {
   totalMin: number;
   placedMin: number;
-  sessions: {
-    title: string;
-    start: number;
-    end: number;
-    stretch?: "relax" | "late";
-  }[];
+  sessions: { title: string; start: number; end: number; stretch?: "relax" | "late" }[];
   short: { title: string; missingMin: number }[];
   stretch?: { relaxMin: number; lateMin: number; latestEnd: number | null };
   warnings: string[];
@@ -150,10 +135,7 @@ type PlannerState = {
   updateClass: (id: string, patch: Partial<Omit<ClassSession, "id">>) => void;
   deleteClass: (id: string) => void;
 
-  addTask: (
-    input: TaskInput,
-    opts?: { pin?: { start: number; end: number }; autoPlan?: boolean },
-  ) => { id: string; plan: PlanSummary | null };
+  addTask: (input: TaskInput, opts?: { pin?: { start: number; end: number }; autoPlan?: boolean }) => { id: string; plan: PlanSummary | null };
   updateTask: (
     id: string,
     patch: Partial<TaskInput> & { loggedMin?: number },
@@ -171,12 +153,11 @@ type PlannerState = {
   addExam: (data: Omit<Exam, "id">) => string;
   updateExam: (id: string, patch: Partial<Omit<Exam, "id">>) => void;
   deleteExam: (id: string) => void;
-  generateStudyPlan: (
-    examId: string,
-    examOverride?: Exam,
-  ) => { tasks: number; plan: PlanSummary | null };
+  generateStudyPlan: (examId: string, examOverride?: Exam) => { tasks: number; plan: PlanSummary | null };
   /** Shows what the plan for this exam would look like, without saving anything. */
   previewStudyPlan: (exam: Exam) => StudyPreview;
+  /** Same for one task (new or being edited). `replaceTaskId` = the task being edited. */
+  previewTaskPlan: (task: Omit<Task, "id">, opts?: { replaceTaskId?: string; pin?: { start: number; end: number } }) => StudyPreview;
 
   addProgress: (entry: ProgressEntry) => void;
 
@@ -186,17 +167,10 @@ type PlannerState = {
 
 const PlannerContext = createContext<PlannerState | null>(null);
 
-const withId = <T,>(snap: {
-  docs: { id: string; data: () => unknown }[];
-}): T[] => snap.docs.map((d) => ({ ...(d.data() as object), id: d.id }) as T);
+const withId = <T,>(snap: { docs: { id: string; data: () => unknown }[] }): T[] =>
+  snap.docs.map((d) => ({ ...(d.data() as object), id: d.id }) as T);
 
-export function PlannerProvider({
-  user,
-  children,
-}: {
-  user: User;
-  children: ReactNode;
-}) {
+export function PlannerProvider({ user, children }: { user: User; children: ReactNode }) {
   const uid = user.uid;
   const now = useNow(30_000);
 
@@ -210,14 +184,7 @@ export function PlannerProvider({
   const [focusLogs, setFocusLogs] = useState<FocusLog[]>([]);
 
   // Always-fresh copy of the data for actions that run right after a write.
-  const stateRef = useRef({
-    settings,
-    subjects,
-    classes,
-    tasks,
-    blocks,
-    exams,
-  });
+  const stateRef = useRef({ settings, subjects, classes, tasks, blocks, exams });
   stateRef.current = { settings, subjects, classes, tasks, blocks, exams };
 
   // Show a message if a save is refused by the server.
@@ -227,8 +194,7 @@ export function PlannerProvider({
       toaster.create({
         type: "error",
         title: "Could not save",
-        description:
-          "Your change was not saved. Check your internet connection and try again.",
+        description: "Your change was not saved. Check your internet connection and try again.",
       });
     });
   }, []);
@@ -253,8 +219,7 @@ export function PlannerProvider({
         (snap) => {
           if (!snap.exists()) {
             if (!snap.metadata.fromCache) {
-              const tz =
-                Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+              const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
               setDoc(
                 userRef(uid),
                 {
@@ -275,52 +240,14 @@ export function PlannerProvider({
         },
         fail("user"),
       ),
-      onSnapshot(
-        colRef(uid, "subjects"),
-        (s) => {
-          setSubjects(withId<Subject>(s));
-          markLoaded("subjects");
-        },
-        fail("subjects"),
-      ),
-      onSnapshot(
-        colRef(uid, "classes"),
-        (s) => {
-          setClasses(withId<ClassSession>(s));
-          markLoaded("classes");
-        },
-        fail("classes"),
-      ),
-      onSnapshot(
-        colRef(uid, "tasks"),
-        (s) => {
-          setTasks(withId<Task>(s));
-          markLoaded("tasks");
-        },
-        fail("tasks"),
-      ),
-      onSnapshot(
-        colRef(uid, "blocks"),
-        (s) => {
-          setBlocks(withId<Block>(s));
-          markLoaded("blocks");
-        },
-        fail("blocks"),
-      ),
-      onSnapshot(
-        colRef(uid, "exams"),
-        (s) => {
-          setExams(withId<Exam>(s));
-          markLoaded("exams");
-        },
-        fail("exams"),
-      ),
+      onSnapshot(colRef(uid, "subjects"), (s) => { setSubjects(withId<Subject>(s)); markLoaded("subjects"); }, fail("subjects")),
+      onSnapshot(colRef(uid, "classes"), (s) => { setClasses(withId<ClassSession>(s)); markLoaded("classes"); }, fail("classes")),
+      onSnapshot(colRef(uid, "tasks"), (s) => { setTasks(withId<Task>(s)); markLoaded("tasks"); }, fail("tasks")),
+      onSnapshot(colRef(uid, "blocks"), (s) => { setBlocks(withId<Block>(s)); markLoaded("blocks"); }, fail("blocks")),
+      onSnapshot(colRef(uid, "exams"), (s) => { setExams(withId<Exam>(s)); markLoaded("exams"); }, fail("exams")),
       onSnapshot(
         query(colRef(uid, "focusLogs"), orderBy("at", "desc"), limit(300)),
-        (s) => {
-          setFocusLogs(withId<FocusLog>(s));
-          markLoaded("focusLogs");
-        },
+        (s) => { setFocusLogs(withId<FocusLog>(s)); markLoaded("focusLogs"); },
         fail("focusLogs"),
       ),
     ];
@@ -328,27 +255,16 @@ export function PlannerProvider({
   }, [uid, user.displayName, user.email, user.photoURL]);
 
   // ── Lookups & alerts ───────────────────────────────────────────────────────────────
-  const subjectMap = useMemo(
-    () => new Map(subjects.map((s) => [s.id, s])),
-    [subjects],
-  );
+  const subjectMap = useMemo(() => new Map(subjects.map((s) => [s.id, s])), [subjects]);
   const taskMap = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
-  const getSubject = useCallback(
-    (id?: string | null) => (id ? subjectMap.get(id) : undefined),
-    [subjectMap],
-  );
-  const getTask = useCallback(
-    (id?: string | null) => (id ? taskMap.get(id) : undefined),
-    [taskMap],
-  );
+  const getSubject = useCallback((id?: string | null) => (id ? subjectMap.get(id) : undefined), [subjectMap]);
+  const getTask = useCallback((id?: string | null) => (id ? taskMap.get(id) : undefined), [taskMap]);
 
   const alerts = useMemo<Alerts>(() => {
     const endOfToday = startOfDay(now) + DAY;
     const todo = tasks.filter((t) => t.status === "todo");
     return {
-      missed: blocks.filter(
-        (b) => isMissed(b, now) && taskMap.get(b.taskId)?.status === "todo",
-      ),
+      missed: blocks.filter((b) => isMissed(b, now) && taskMap.get(b.taskId)?.status === "todo"),
       overdue: todo.filter((t) => isOverdue(t, now)),
       dueToday: todo.filter((t) => {
         const due = Date.parse(t.dueAt);
@@ -359,33 +275,22 @@ export function PlannerProvider({
   }, [blocks, tasks, taskMap, settings, classes, subjects, now]);
 
   // ── Planning helpers ───────────────────────────────────────────────────────────────
-  const summarize = useCallback(
-    (result: PlanResult, taskList: Task[], moved = 0): PlanSummary => ({
-      placed: result.create.length,
-      moved,
-      short: result.unscheduled
-        .map((u) => ({
-          task: taskList.find((t) => t.id === u.taskId) as Task,
-          missingMin: u.missingMin,
-        }))
-        .filter((u) => u.task),
-      stretch: result.stretch,
-    }),
-    [],
-  );
+  const summarize = useCallback((result: PlanResult, taskList: Task[], moved = 0): PlanSummary => ({
+    placed: result.create.length,
+    moved,
+    short: result.unscheduled
+      .map((u) => ({ task: taskList.find((t) => t.id === u.taskId) as Task, missingMin: u.missingMin }))
+      .filter((u) => u.task),
+    stretch: result.stretch,
+  }), []);
 
   /** Runs the scheduler on the latest data (plus optional "not saved yet" changes) and saves the result. */
   const replan = useCallback(
-    (
-      mode: PlanMode,
-      over?: { tasks?: Task[]; blocks?: Block[]; dropIds?: string[] },
-    ): PlanSummary => {
+    (mode: PlanMode, over?: { tasks?: Task[]; blocks?: Block[]; dropIds?: string[] }): PlanSummary => {
       const s = stateRef.current;
       const dropped = new Set(over?.dropIds || []);
       const taskList = over?.tasks ?? s.tasks;
-      const blockList = (over?.blocks ?? s.blocks).filter(
-        (b) => !dropped.has(b.id),
-      );
+      const blockList = (over?.blocks ?? s.blocks).filter((b) => !dropped.has(b.id));
       const result = planSchedule({
         now: Date.now(),
         mode,
@@ -395,11 +300,7 @@ export function PlannerProvider({
         tasks: taskList,
         blocks: blockList,
       });
-      applyPlan(
-        uid,
-        Array.from(new Set([...result.removeIds, ...dropped])),
-        result.create,
-      );
+      applyPlan(uid, Array.from(new Set([...result.removeIds, ...dropped])), result.create);
       return summarize(result, taskList);
     },
     [uid, summarize],
@@ -429,10 +330,7 @@ export function PlannerProvider({
     }
     if (fixed.length === 0) return;
     const fixedIds = new Map(fixed.map((t) => [t.id, t]));
-    toastPlan(
-      replan("full", { tasks: tasks.map((t) => fixedIds.get(t.id) || t) }),
-      "Exam study plan fixed",
-    );
+    toastPlan(replan("full", { tasks: tasks.map((t) => fixedIds.get(t.id) || t) }), "Exam study plan fixed");
   }, [loadedCount, tasks, exams, uid, replan]);
 
   // ── Actions ────────────────────────────────────────────────────────────────────────
@@ -446,35 +344,16 @@ export function PlannerProvider({
       if (!exam) return { tasks: 0, plan: null as PlanSummary | null };
 
       // Replace the old (unfinished) study tasks of this exam, but keep the time you already worked.
-      const old = s.tasks.filter(
-        (t) => t.examId === examId && t.status === "todo",
-      );
+      const old = s.tasks.filter((t) => t.examId === examId && t.status === "todo");
       const oldIds = new Set(old.map((t) => t.id));
       const oldBlocks = s.blocks.filter((b) => oldIds.has(b.taskId));
-      deleteTasksCascade(
-        uid,
-        old.map((t) => t.id),
-        oldBlocks.map((b) => b.id),
-      );
+      deleteTasksCascade(uid, old.map((t) => t.id), oldBlocks.map((b) => b.id));
 
-      const doneTitles = new Set(
-        s.tasks
-          .filter((t) => t.examId === examId && t.status === "done")
-          .map((t) => t.title),
-      );
-      const workedByTitle = new Map(
-        old.map((t) => [t.title, t.loggedMin || 0]),
-      );
-      const drafts = buildStudyTasks(
-        exam,
-        s.subjects.find((x) => x.id === exam.subjectId),
-        now0(),
-      )
+      const doneTitles = new Set(s.tasks.filter((t) => t.examId === examId && t.status === "done").map((t) => t.title));
+      const workedByTitle = new Map(old.map((t) => [t.title, t.loggedMin || 0]));
+      const drafts = buildStudyTasks(exam, s.subjects.find((x) => x.id === exam.subjectId), now0())
         .filter((d) => !doneTitles.has(d.title))
-        .map((d) => ({
-          ...d,
-          loggedMin: Math.min(d.estimateMin, workedByTitle.get(d.title) || 0),
-        }));
+        .map((d) => ({ ...d, loggedMin: Math.min(d.estimateMin, workedByTitle.get(d.title) || 0) }));
       const created: Task[] = drafts.map((d) => {
         const id = newId(uid, "tasks");
         setDocWithId<Task>(uid, "tasks", id, d);
@@ -492,29 +371,14 @@ export function PlannerProvider({
     const previewStudyPlan = (exam: Exam): StudyPreview => {
       const s = stateRef.current;
       const t0 = now0();
-      const drafts = buildStudyTasks(
-        exam,
-        s.subjects.find((x) => x.id === exam.subjectId),
-        t0,
-      ).map((d, i) => ({
+      const drafts = buildStudyTasks(exam, s.subjects.find((x) => x.id === exam.subjectId), t0).map((d, i) => ({
         ...d,
         id: `preview-${i}`,
       })) as Task[];
       if (drafts.length === 0) {
-        return {
-          totalMin: 0,
-          placedMin: 0,
-          sessions: [],
-          short: [],
-          warnings: [],
-          empty: true,
-        };
+        return { totalMin: 0, placedMin: 0, sessions: [], short: [], warnings: [], empty: true };
       }
-      const oldIds = new Set(
-        s.tasks
-          .filter((t) => t.examId === exam.id && t.status === "todo")
-          .map((t) => t.id),
-      );
+      const oldIds = new Set(s.tasks.filter((t) => t.examId === exam.id && t.status === "todo").map((t) => t.id));
       const result = planSchedule({
         now: t0,
         mode: "incremental",
@@ -524,19 +388,13 @@ export function PlannerProvider({
         tasks: [...s.tasks.filter((t) => !oldIds.has(t.id)), ...drafts],
         blocks: s.blocks.filter((b) => !oldIds.has(b.taskId)),
       });
-      const title = (id: string) =>
-        drafts.find((d) => d.id === id)?.title || "";
+      const title = (id: string) => drafts.find((d) => d.id === id)?.title || "";
       const mine = result.create.filter((b) => b.taskId.startsWith("preview-"));
       return {
         totalMin: drafts.reduce((a, d) => a + d.estimateMin, 0),
         placedMin: mine.reduce((a, b) => a + blockMinutes(b), 0),
         sessions: mine
-          .map((b) => ({
-            title: title(b.taskId),
-            start: Date.parse(b.start),
-            end: Date.parse(b.end),
-            stretch: b.stretch,
-          }))
+          .map((b) => ({ title: title(b.taskId), start: Date.parse(b.start), end: Date.parse(b.end), stretch: b.stretch }))
           .sort((a, b) => a.start - b.start),
         short: result.unscheduled
           .filter((u) => u.taskId.startsWith("preview-"))
@@ -547,15 +405,56 @@ export function PlannerProvider({
       };
     };
 
-    const toastPlanSoon = (r: { plan: PlanSummary | null }) =>
-      toastPlan(r.plan, "Exam plan updated");
+    const previewTaskPlan = (
+      draft: Omit<Task, "id">,
+      opts?: { replaceTaskId?: string; pin?: { start: number; end: number } },
+    ): StudyPreview => {
+      const s = stateRef.current;
+      const t0 = now0();
+      const pid = "preview-task";
+      const task: Task = { ...draft, id: pid };
+      if (!(Date.parse(task.dueAt) > t0)) return { totalMin: 0, placedMin: 0, sessions: [], short: [], warnings: [], empty: true };
+      const blocks: Block[] = s.blocks.filter((b) => b.taskId !== opts?.replaceTaskId);
+      if (opts?.pin && opts.pin.end > opts.pin.start) {
+        blocks.push({
+          id: "preview-pin",
+          taskId: pid,
+          start: new Date(opts.pin.start).toISOString(),
+          end: new Date(opts.pin.end).toISOString(),
+          status: "planned",
+          locked: true,
+        });
+      }
+      const result = planSchedule({
+        now: t0,
+        mode: "incremental",
+        settings: s.settings,
+        subjects: s.subjects,
+        classes: s.classes,
+        tasks: [...s.tasks.filter((t) => t.id !== opts?.replaceTaskId), task],
+        blocks,
+      });
+      const mine = result.create.filter((b) => b.taskId === pid);
+      const sessions = [
+        ...mine.map((b) => ({ title: task.title, start: Date.parse(b.start), end: Date.parse(b.end), stretch: b.stretch })),
+        ...(opts?.pin && opts.pin.end > opts.pin.start ? [{ title: task.title, start: opts.pin.start, end: opts.pin.end, stretch: undefined }] : []),
+      ].sort((a, b) => a.start - b.start);
+      return {
+        totalMin: Math.max(0, task.estimateMin - (task.loggedMin || 0)),
+        placedMin: sessions.reduce((a, x) => a + Math.round((x.end - x.start) / MIN), 0),
+        sessions,
+        short: result.unscheduled.filter((u) => u.taskId === pid).map((u) => ({ title: task.title, missingMin: u.missingMin })),
+        stretch: result.stretch,
+        warnings: result.warnings,
+        empty: false,
+      };
+    };
+
+    const toastPlanSoon = (r: { plan: PlanSummary | null }) => toastPlan(r.plan, "Exam plan updated");
+
 
     const plannedUnlockedIds = (taskId: string) =>
-      stateRef.current.blocks
-        .filter(
-          (b) => b.taskId === taskId && b.status === "planned" && !b.locked,
-        )
-        .map((b) => b.id);
+      stateRef.current.blocks.filter((b) => b.taskId === taskId && b.status === "planned" && !b.locked).map((b) => b.id);
 
     /** Planned sessions of OTHER tasks that sit on top of a time you picked yourself. */
     const overlapping = (start: number, end: number, exceptTaskId: string) =>
@@ -572,67 +471,42 @@ export function PlannerProvider({
 
     const deleteTaskIds = (taskIds: string[]) => {
       const set = new Set(taskIds);
-      const blockIds = stateRef.current.blocks
-        .filter((b) => set.has(b.taskId))
-        .map((b) => b.id);
+      const blockIds = stateRef.current.blocks.filter((b) => set.has(b.taskId)).map((b) => b.id);
       deleteTasksCascade(uid, taskIds, blockIds);
     };
 
     const completeTask = (id: string) => {
-      patchDoc<Task>(uid, "tasks", id, {
-        status: "done",
-        completedAt: new Date().toISOString(),
-      });
+      patchDoc<Task>(uid, "tasks", id, { status: "done", completedAt: new Date().toISOString() });
       // Sessions that were still planned are no longer needed.
-      const ids = stateRef.current.blocks
-        .filter((b) => b.taskId === id && b.status === "planned")
-        .map((b) => b.id);
+      const ids = stateRef.current.blocks.filter((b) => b.taskId === id && b.status === "planned").map((b) => b.id);
       runBatched(ids.map((bid) => (b) => b.delete(docRef(uid, "blocks", bid))));
     };
 
     return {
       saveSettings: (next: Settings) => {
         setSettings(next);
-        setDoc(userRef(uid), { settings: next }, { merge: true }).catch((e) =>
-          console.error(e),
-        );
+        setDoc(userRef(uid), { settings: next }, { merge: true }).catch((e) => console.error(e));
       },
 
       // Subjects
-      addSubject: (data: Omit<Subject, "id">) =>
-        createDoc<Subject>(uid, "subjects", data),
-      updateSubject: (id: string, patch: Partial<Omit<Subject, "id">>) =>
-        patchDoc<Subject>(uid, "subjects", id, patch),
+      addSubject: (data: Omit<Subject, "id">) => createDoc<Subject>(uid, "subjects", data),
+      updateSubject: (id: string, patch: Partial<Omit<Subject, "id">>) => patchDoc<Subject>(uid, "subjects", id, patch),
       deleteSubject: (id: string) => {
         const s = stateRef.current;
-        const ops: ((b: WriteBatch) => void)[] = [
-          (b) => b.delete(docRef(uid, "subjects", id)),
-        ];
-        for (const c of s.classes.filter((c) => c.subjectId === id))
-          ops.push((b) => b.delete(docRef(uid, "classes", c.id)));
-        for (const t of s.tasks.filter((t) => t.subjectId === id))
-          ops.push((b) =>
-            b.update(docRef(uid, "tasks", t.id), { subjectId: null }),
-          );
-        for (const e of s.exams.filter((e) => e.subjectId === id))
-          ops.push((b) =>
-            b.update(docRef(uid, "exams", e.id), { subjectId: null }),
-          );
+        const ops: ((b: WriteBatch) => void)[] = [(b) => b.delete(docRef(uid, "subjects", id))];
+        for (const c of s.classes.filter((c) => c.subjectId === id)) ops.push((b) => b.delete(docRef(uid, "classes", c.id)));
+        for (const t of s.tasks.filter((t) => t.subjectId === id)) ops.push((b) => b.update(docRef(uid, "tasks", t.id), { subjectId: null }));
+        for (const e of s.exams.filter((e) => e.subjectId === id)) ops.push((b) => b.update(docRef(uid, "exams", e.id), { subjectId: null }));
         runBatched(ops);
       },
 
       // Classes
-      addClass: (data: Omit<ClassSession, "id">) =>
-        createDoc<ClassSession>(uid, "classes", data),
-      updateClass: (id: string, patch: Partial<Omit<ClassSession, "id">>) =>
-        patchDoc<ClassSession>(uid, "classes", id, patch),
+      addClass: (data: Omit<ClassSession, "id">) => createDoc<ClassSession>(uid, "classes", data),
+      updateClass: (id: string, patch: Partial<Omit<ClassSession, "id">>) => patchDoc<ClassSession>(uid, "classes", id, patch),
       deleteClass: (id: string) => removeDoc(uid, "classes", id),
 
       // Tasks
-      addTask: (
-        input: TaskInput,
-        opts?: { pin?: { start: number; end: number }; autoPlan?: boolean },
-      ) => {
+      addTask: (input: TaskInput, opts?: { pin?: { start: number; end: number }; autoPlan?: boolean }) => {
         const s = stateRef.current;
         const id = newId(uid, "tasks");
         const task: Task = {
@@ -655,10 +529,7 @@ export function PlannerProvider({
             status: "planned",
             locked: true,
           };
-          extraBlocks.push({
-            ...block,
-            id: createDoc<Block>(uid, "blocks", block),
-          });
+          extraBlocks.push({ ...block, id: createDoc<Block>(uid, "blocks", block) });
         }
         const plan =
           opts?.autoPlan === false
@@ -667,9 +538,7 @@ export function PlannerProvider({
                 tasks: [...s.tasks, task],
                 blocks: [...s.blocks, ...extraBlocks],
                 // Other sessions that sit on the time you picked are moved elsewhere.
-                dropIds: opts?.pin
-                  ? overlapping(opts.pin.start, opts.pin.end, id)
-                  : [],
+                dropIds: opts?.pin ? overlapping(opts.pin.start, opts.pin.end, id) : [],
               });
         return { id, plan };
       },
@@ -694,18 +563,12 @@ export function PlannerProvider({
         if (opts.pin && opts.pin.end > opts.pin.start) {
           const pinMin = Math.round((opts.pin.end - opts.pin.start) / MIN);
           const fixed = s.blocks.filter(
-            (b) =>
-              b.taskId === id &&
-              b.status === "planned" &&
-              b.locked &&
-              Date.parse(b.end) > Date.now(),
+            (b) => b.taskId === id && b.status === "planned" && b.locked && Date.parse(b.end) > Date.now(),
           );
           const fixedMin = fixed.reduce((sum, b) => sum + blockMinutes(b), 0);
           // The new preferred time replaces earlier fixed times when together they would be more than the time left.
-          if (fixedMin + pinMin > remainingMinutes(updated, s.blocks))
-            for (const b of fixed) dropIds.add(b.id);
-          for (const other of overlapping(opts.pin.start, opts.pin.end, id))
-            dropIds.add(other);
+          if (fixedMin + pinMin > remainingMinutes(updated, s.blocks)) for (const b of fixed) dropIds.add(b.id);
+          for (const other of overlapping(opts.pin.start, opts.pin.end, id)) dropIds.add(other);
           const block: Omit<Block, "id"> = {
             taskId: id,
             start: new Date(opts.pin.start).toISOString(),
@@ -715,11 +578,7 @@ export function PlannerProvider({
           };
           extra.push({ ...block, id: createDoc<Block>(uid, "blocks", block) });
         }
-        return replan("incremental", {
-          tasks: nextTasks,
-          blocks: [...s.blocks, ...extra],
-          dropIds: Array.from(dropIds),
-        });
+        return replan("incremental", { tasks: nextTasks, blocks: [...s.blocks, ...extra], dropIds: Array.from(dropIds) });
       },
 
       completeTask,
@@ -727,11 +586,7 @@ export function PlannerProvider({
       reopenTask: (id: string) => {
         const s = stateRef.current;
         patchDoc<Task>(uid, "tasks", id, { status: "todo", completedAt: null });
-        const next = s.tasks.map((t) =>
-          t.id === id
-            ? { ...t, status: "todo" as const, completedAt: null }
-            : t,
-        );
+        const next = s.tasks.map((t) => (t.id === id ? { ...t, status: "todo" as const, completedAt: null } : t));
         return replan("incremental", { tasks: next });
       },
 
@@ -747,56 +602,27 @@ export function PlannerProvider({
         if (block.status === "done") {
           // Undo: take back only the minutes that ticking added. Time you really focused stays counted.
           const back = block.creditedMin || 0;
-          patchDoc<Block>(uid, "blocks", blockId, {
-            status: "planned",
-            creditedMin: 0,
-          });
-          if (task && back > 0)
-            patchDoc<Task>(uid, "tasks", task.id, {
-              loggedMin: increment(-back) as unknown as number,
-            });
+          patchDoc<Block>(uid, "blocks", blockId, { status: "planned", creditedMin: 0 });
+          if (task && back > 0) patchDoc<Task>(uid, "tasks", task.id, { loggedMin: increment(-back) as unknown as number });
           return;
         }
 
         // Ticking a session counts the part of it you did not already work with the timer.
-        const credit = Math.max(
-          0,
-          blockMinutes(block) - (block.focusedMin || 0),
-        );
-        patchDoc<Block>(uid, "blocks", blockId, {
-          status: "done",
-          creditedMin: credit,
-        });
+        const credit = Math.max(0, blockMinutes(block) - (block.focusedMin || 0));
+        patchDoc<Block>(uid, "blocks", blockId, { status: "done", creditedMin: credit });
         if (!task) return;
-        if (credit > 0)
-          patchDoc<Task>(uid, "tasks", task.id, {
-            loggedMin: increment(credit) as unknown as number,
-          });
+        if (credit > 0) patchDoc<Task>(uid, "tasks", task.id, { loggedMin: increment(credit) as unknown as number });
         if (task.status === "todo") {
-          const after = s.blocks.map((b) =>
-            b.id === blockId
-              ? { ...b, status: "done" as const, creditedMin: credit }
-              : b,
-          );
-          if (
-            remainingMinutes(
-              { ...task, loggedMin: (task.loggedMin || 0) + credit },
-              after,
-            ) <= 0
-          ) {
+          const after = s.blocks.map((b) => (b.id === blockId ? { ...b, status: "done" as const, creditedMin: credit } : b));
+          if (remainingMinutes({ ...task, loggedMin: (task.loggedMin || 0) + credit }, after) <= 0) {
             completeTask(task.id);
-            toaster.create({
-              type: "success",
-              title: "Task finished",
-              description: `"${task.title}" is complete. Nice work!`,
-            });
+            toaster.create({ type: "success", title: "Task finished", description: `"${task.title}" is complete. Nice work!` });
           }
         }
       },
       toggleBlockLock: (blockId: string) => {
         const block = stateRef.current.blocks.find((b) => b.id === blockId);
-        if (block)
-          patchDoc<Block>(uid, "blocks", blockId, { locked: !block.locked });
+        if (block) patchDoc<Block>(uid, "blocks", blockId, { locked: !block.locked });
       },
       deleteBlock: (blockId: string) => removeDoc(uid, "blocks", blockId),
       addSession: (taskId: string, start: number, end: number) => {
@@ -822,14 +648,13 @@ export function PlannerProvider({
         if (hasPlan) toastPlanSoon(generateStudyPlan(id, merged));
       },
       deleteExam: (id: string) => {
-        const study = stateRef.current.tasks
-          .filter((t) => t.examId === id)
-          .map((t) => t.id);
+        const study = stateRef.current.tasks.filter((t) => t.examId === id).map((t) => t.id);
         if (study.length) deleteTaskIds(study);
         removeDoc(uid, "exams", id);
       },
       generateStudyPlan,
       previewStudyPlan,
+      previewTaskPlan,
 
       // Focus timer: saves the minutes you worked (called every minute and when the timer stops).
       addProgress: (p: ProgressEntry) => {
@@ -839,74 +664,42 @@ export function PlannerProvider({
           // One log per timer round: later saves of the same round add to it.
           setDoc(
             docRef(uid, "focusLogs", p.runId),
-            {
-              taskId: p.taskId,
-              blockId: p.blockId,
-              kind: p.kind,
-              at: new Date().toISOString(),
-              minutes: increment(p.minutes),
-            },
+            { taskId: p.taskId, blockId: p.blockId, kind: p.kind, at: new Date().toISOString(), minutes: increment(p.minutes) },
             { merge: true },
           ).catch((e) => console.error(e));
         }
 
-        const task = p.taskId
-          ? s.tasks.find((t) => t.id === p.taskId)
-          : undefined;
+        const task = p.taskId ? s.tasks.find((t) => t.id === p.taskId) : undefined;
         if (!task || !p.creditTask) return;
 
         let blocksAfter = s.blocks;
         if (p.minutes > 0) {
-          patchDoc<Task>(uid, "tasks", task.id, {
-            loggedMin: increment(p.minutes) as unknown as number,
-          });
-          const block = p.blockId
-            ? s.blocks.find((b) => b.id === p.blockId && b.taskId === task.id)
-            : undefined;
+          patchDoc<Task>(uid, "tasks", task.id, { loggedMin: increment(p.minutes) as unknown as number });
+          const block = p.blockId ? s.blocks.find((b) => b.id === p.blockId && b.taskId === task.id) : undefined;
           if (block) {
             const focused = (block.focusedMin || 0) + p.minutes;
             // A planned session that has been fully worked is finished by itself.
-            const finished =
-              block.status === "planned" && focused >= blockMinutes(block);
-            const extra = finished
-              ? { status: "done" as const, creditedMin: 0 }
-              : {};
-            patchDoc<Block>(uid, "blocks", block.id, {
-              focusedMin: increment(p.minutes) as unknown as number,
-              ...extra,
-            });
-            blocksAfter = s.blocks.map((b) =>
-              b.id === block.id ? { ...b, focusedMin: focused, ...extra } : b,
-            );
+            const finished = block.status === "planned" && focused >= blockMinutes(block);
+            const extra = finished ? { status: "done" as const, creditedMin: 0 } : {};
+            patchDoc<Block>(uid, "blocks", block.id, { focusedMin: increment(p.minutes) as unknown as number, ...extra });
+            blocksAfter = s.blocks.map((b) => (b.id === block.id ? { ...b, focusedMin: focused, ...extra } : b));
           }
         }
 
         if (!p.settle) return;
 
         // The timer stopped: shorten or remove future sessions that are no longer needed.
-        const updated: Task = {
-          ...task,
-          loggedMin: (task.loggedMin || 0) + p.minutes,
-        };
-        if (
-          task.status === "todo" &&
-          remainingMinutes(updated, blocksAfter) <= 0
-        ) {
+        const updated: Task = { ...task, loggedMin: (task.loggedMin || 0) + p.minutes };
+        if (task.status === "todo" && remainingMinutes(updated, blocksAfter) <= 0) {
           toaster.create({
             type: "success",
             title: "You reached your time estimate",
             description: `"${task.title}" has all the time you planned for it.`,
             duration: 12000,
-            action: {
-              label: "Mark done",
-              onClick: () => completeTask(task.id),
-            },
+            action: { label: "Mark done", onClick: () => completeTask(task.id) },
           });
         }
-        replan("trim", {
-          tasks: s.tasks.map((t) => (t.id === task.id ? updated : t)),
-          blocks: blocksAfter,
-        });
+        replan("trim", { tasks: s.tasks.map((t) => (t.id === task.id ? updated : t)), blocks: blocksAfter });
       },
 
       // Scheduling
@@ -944,9 +737,7 @@ export function PlannerProvider({
     ...actions,
   };
 
-  return (
-    <PlannerContext.Provider value={value}>{children}</PlannerContext.Provider>
-  );
+  return <PlannerContext.Provider value={value}>{children}</PlannerContext.Provider>;
 }
 
 export function usePlanner(): PlannerState {

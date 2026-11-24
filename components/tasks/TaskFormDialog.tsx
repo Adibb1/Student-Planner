@@ -1,8 +1,9 @@
 "use client";
 
-import { Button, Checkbox, HStack, IconButton, Input, Stack, Text, Textarea } from "@chakra-ui/react";
+import { Box, Button, Checkbox, HStack, IconButton, Input, Stack, Switch, Text, Textarea } from "@chakra-ui/react";
 import { useEffect, useMemo, useState } from "react";
 import { LuMinus, LuPlus } from "react-icons/lu";
+import { PlanPreview } from "@/components/PlanPreview";
 import { FormField } from "@/components/Shared";
 import { FormDialog } from "@/components/ui/FormDialog";
 import { Select } from "@/components/ui/Select";
@@ -30,7 +31,18 @@ type Draft = {
   pinDate: string;
   pinStart: string;
   pinEnd: string;
+  startFrom: string; // "" = as soon as possible
+  windowOn: boolean;
+  winStart: string;
+  winEnd: string;
+  allowOvertime: boolean;
 };
+
+const windowPresets = [
+  { label: "Morning", start: "08:00", end: "12:00" },
+  { label: "Afternoon", start: "13:00", end: "17:00" },
+  { label: "Evening", start: "17:00", end: "22:00" },
+];
 
 const hhmm = (ms: number) => toLocalInput(ms).slice(11, 16);
 
@@ -61,6 +73,11 @@ function makeDraft(task: Task | null | undefined, workedMin: number, subjectId: 
       autoPlan: true,
       pin: false,
       ...defaultPin(now, remainingMinutes(task, [])),
+      startFrom: task.startAfter ? toLocalInput(Date.parse(task.startAfter)) : "",
+      windowOn: !!task.window,
+      winStart: task.window?.start || "08:00",
+      winEnd: task.window?.end || "12:00",
+      allowOvertime: task.allowOvertime !== false,
     };
   }
   return {
@@ -75,6 +92,11 @@ function makeDraft(task: Task | null | undefined, workedMin: number, subjectId: 
     autoPlan: true,
     pin: false,
     ...defaultPin(now, 60),
+    startFrom: "",
+    windowOn: false,
+    winStart: "08:00",
+    winEnd: "12:00",
+    allowOvertime: true,
   };
 }
 
@@ -90,7 +112,8 @@ export function TaskFormDialog({
   task?: Task | null;
   defaultSubjectId?: string;
 }) {
-  const { subjects, classes, blocks, settings, now, getSubject, addTask, updateTask, deleteTask } = usePlanner();
+  const { subjects, classes, blocks, settings, now, getSubject, addTask, updateTask, deleteTask, previewTaskPlan } = usePlanner();
+  const [showSessions, setShowSessions] = useState(false);
   const legacy = task ? legacyDoneMinutes(task.id, blocks) : 0;
   const workedNow = task ? (task.loggedMin || 0) + legacy : 0;
   const [draft, setDraft] = useState<Draft>(() => makeDraft(task, workedNow, defaultSubjectId, Date.now()));
@@ -109,6 +132,41 @@ export function TaskFormDialog({
   const pinValid = !draft.pin || (pinEndMs > pinStartMs && pinStartMs > now);
   const workedValid = !task || (Number.isFinite(workedInput) && workedInput >= 0);
   const valid = draft.title.trim().length > 0 && total >= 5 && Number.isFinite(dueMs) && pinValid && workedValid;
+
+  // The scheduling options (same as for exams).
+  const startFromMs = draft.startFrom ? fromLocalInput(draft.startFrom) : NaN;
+  const options = {
+    startAfter: Number.isFinite(startFromMs) && startFromMs > now ? new Date(startFromMs).toISOString() : null,
+    window: draft.windowOn && draft.winStart && draft.winEnd ? { start: draft.winStart, end: draft.winEnd } : null,
+    allowOvertime: draft.allowOvertime,
+    // "Never after the deadline": lets the planner use relax time / late nights only when it must.
+    // Exam tasks keep the limit their exam gave them.
+    ...(task?.examId ? {} : { hardDueAt: draft.allowOvertime && Number.isFinite(dueMs) ? new Date(dueMs).toISOString() : null }),
+  };
+
+  // Live check: does it fit before the deadline?
+  const preview = useMemo(() => {
+    if (!open || total < 5 || !Number.isFinite(dueMs)) return null;
+    return previewTaskPlan(
+      {
+        title: draft.title.trim() || "This task",
+        subjectId: draft.subjectId || null,
+        kind: draft.kind,
+        dueAt: new Date(dueMs).toISOString(),
+        estimateMin: total,
+        loggedMin: task ? Math.max(0, (workedValid ? workedInput : 0)) : 0,
+        priority: draft.priority,
+        status: "todo",
+        createdAt: new Date(now).toISOString(),
+        completedAt: null,
+        examId: task?.examId ?? null,
+        ...(task?.examId ? { hardDueAt: task.hardDueAt ?? null } : {}),
+        ...options,
+      },
+      { replaceTaskId: task?.id, pin: draft.pin && pinValid ? { start: pinStartMs, end: pinEndMs } : undefined },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, draft, total, dueMs, workedInput, workedValid, pinValid, pinStartMs, pinEndMs, task, previewTaskPlan, now]);
 
   // Tell the person if the time they picked sits on a class or a routine item (they may still keep it).
   const clashNames = useMemo(() => {
@@ -135,12 +193,17 @@ export function TaskFormDialog({
       estimateMin: total,
       priority: draft.priority,
       notes: draft.notes.trim(),
+      ...options,
     };
     const pin = draft.pin ? { start: pinStartMs, end: pinEndMs } : undefined;
 
     if (task) {
       const workedChanged = workedInput !== Math.round(workedNow);
-      const changedPlan = data.estimateMin !== task.estimateMin || data.dueAt !== task.dueAt || workedChanged;
+      const optionsChanged =
+        (task.startAfter ?? null) !== options.startAfter ||
+        JSON.stringify(task.window ?? null) !== JSON.stringify(options.window) ||
+        (task.allowOvertime !== false) !== options.allowOvertime;
+      const changedPlan = data.estimateMin !== task.estimateMin || data.dueAt !== task.dueAt || workedChanged || optionsChanged;
       const patch = workedChanged ? { ...data, loggedMin: Math.max(0, workedInput - legacy) } : data;
       const plan = updateTask(task.id, patch, { replan: changedPlan && draft.autoPlan, pin });
       toastPlan(plan, pin ? "Preferred time saved and the rest re-planned" : "Task updated and re-planned");
@@ -257,6 +320,70 @@ export function TaskFormDialog({
         <FormField label="Notes (optional)">
           <Textarea rows={2} value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} />
         </FormField>
+
+        <Box borderTopWidth="1px" pt={4}>
+          <Text fontWeight="semibold" mb={3}>
+            When to work on it
+          </Text>
+          <Stack gap={4}>
+            <FormField label="Start working from" hint="Leave empty to start as soon as possible.">
+              <Input type="datetime-local" value={draft.startFrom} onChange={(e) => setDraft({ ...draft, startFrom: e.target.value })} />
+            </FormField>
+            <HStack gap={2} wrap="wrap">
+              <Button type="button" size="xs" variant="outline" onClick={() => setDraft({ ...draft, startFrom: toLocalInput(atTime(startOfDay(now), "19:00")) })}>
+                Start tonight 19:00
+              </Button>
+              <Button type="button" size="xs" variant="outline" onClick={() => setDraft({ ...draft, startFrom: toLocalInput(atTime(addDays(startOfDay(now), 1), "08:00")) })}>
+                Start tomorrow 08:00
+              </Button>
+              <Button type="button" size="xs" variant="ghost" onClick={() => setDraft({ ...draft, startFrom: "" })}>
+                Clear
+              </Button>
+            </HStack>
+
+            <Switch.Root colorPalette="teal" checked={draft.windowOn} onCheckedChange={(e) => setDraft({ ...draft, windowOn: e.checked })}>
+              <Switch.HiddenInput />
+              <Switch.Control />
+              <Switch.Label>Prefer a time of day for the sessions</Switch.Label>
+            </Switch.Root>
+            {draft.windowOn && (
+              <Stack gap={2}>
+                <HStack gap={2} wrap="wrap">
+                  {windowPresets.map((p) => (
+                    <Button
+                      key={p.label}
+                      type="button"
+                      size="xs"
+                      variant={draft.winStart === p.start && draft.winEnd === p.end ? "solid" : "outline"}
+                      colorPalette={draft.winStart === p.start && draft.winEnd === p.end ? "teal" : undefined}
+                      onClick={() => setDraft({ ...draft, winStart: p.start, winEnd: p.end })}
+                    >
+                      {p.label} {p.start}–{p.end}
+                    </Button>
+                  ))}
+                </HStack>
+                <HStack gap={2}>
+                  <Input type="time" w="36" aria-label="Preferred from" value={draft.winStart} onChange={(e) => setDraft({ ...draft, winStart: e.target.value })} />
+                  <Text color="fg.muted">to</Text>
+                  <Input type="time" w="36" aria-label="Preferred until" value={draft.winEnd} onChange={(e) => setDraft({ ...draft, winEnd: e.target.value })} />
+                </HStack>
+                <Text fontSize="xs" color="fg.muted">
+                  Used when possible. If it does not fit, other free times are used.
+                </Text>
+              </Stack>
+            )}
+
+            <Switch.Root colorPalette="orange" checked={draft.allowOvertime} onCheckedChange={(e) => setDraft({ ...draft, allowOvertime: e.checked })}>
+              <Switch.HiddenInput />
+              <Switch.Control />
+              <Switch.Label>If it does not fit, use relax time and late nights (never after the deadline)</Switch.Label>
+            </Switch.Root>
+          </Stack>
+        </Box>
+
+        {preview && (
+          <PlanPreview preview={preview} allowOvertime={draft.allowOvertime} noun="deadline" open={showSessions} onToggle={() => setShowSessions((v) => !v)} />
+        )}
 
         <Stack gap={3} p={3} borderWidth="1px" borderColor="border" rounded="lg">
           <Checkbox.Root colorPalette="teal" checked={draft.pin} onCheckedChange={(e) => setDraft({ ...draft, pin: !!e.checked })}>

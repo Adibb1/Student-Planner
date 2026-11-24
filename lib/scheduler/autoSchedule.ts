@@ -178,7 +178,12 @@ export function planSchedule(input: PlanInput): PlanResult {
   // ── 2. What is still left for each task ──────────────────────────────────────────────
   // `soft` = the deadline you gave, `hard` = the very last moment work may be planned
   // (e.g. when the exam starts). Without a hard limit the two are the same.
-  const hardOf = (t: Task) => (t.hardDueAt ? Date.parse(t.hardDueAt) : null);
+  const hardOf = (t: Task) => {
+    if (!t.hardDueAt) return null;
+    const hard = Date.parse(t.hardDueAt);
+    // An overdue ordinary task can still be rescheduled; work for an exam that already started cannot.
+    return hard <= now && !t.examId ? null : hard;
+  };
   const softOf = (t: Task) => {
     const due = Date.parse(t.dueAt);
     const hard = hardOf(t);
