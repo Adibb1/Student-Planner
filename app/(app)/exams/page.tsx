@@ -79,7 +79,7 @@ type Draft = {
 };
 
 let rowCounter = 0;
-const newRow = (name = "", time = "45m"): ChapterRow => ({
+const newRow = (name = "", time = ""): ChapterRow => ({
   key: `row-${Date.now()}-${rowCounter++}`,
   name,
   time,
@@ -91,7 +91,7 @@ const blank = (now: number, subjectId = ""): Draft => ({
   startsAt: toLocalInput(addDays(startOfDay(now), 7) + 9 * HOUR),
   durationMin: 60,
   venue: "",
-  chapters: [newRow("Chapter 1"), newRow("Chapter 2")],
+  chapters: [newRow(""), newRow("")],
   bulk: "",
   recap: "0",
   startFrom: "",
@@ -113,7 +113,7 @@ const windowPresets = [
 function draftToExam(d: Draft): Omit<Exam, "id"> | null {
   const startsMs = fromLocalInput(d.startsAt);
   if (!d.title.trim() || !Number.isFinite(startsMs)) return null;
-  const rows = d.chapters.filter((r) => r.name.trim() || r.time.trim());
+  const rows = d.chapters;
   const chapters = rows.map((r) => ({
     id: r.key,
     name: r.name.trim(),
@@ -400,10 +400,7 @@ export default function ExamsPage() {
         title="Exams"
         subtitle="Add an exam with its chapters and the time you want for each. The planner turns it into study sessions that fit around your classes and routine, and never plans anything after the exam starts."
         actions={
-          <Button
-            colorPalette="teal"
-            onClick={() => setDraft(blank(now, subjects[0]?.id))}
-          >
+          <Button colorPalette="teal" onClick={() => setDraft(blank(now))}>
             <LuPlus /> Add exam
           </Button>
         }
@@ -415,10 +412,7 @@ export default function ExamsPage() {
           title="No exams yet"
           text="Add a test or final exam to get a countdown and an automatic study plan."
           action={
-            <Button
-              colorPalette="teal"
-              onClick={() => setDraft(blank(now, subjects[0]?.id))}
-            >
+            <Button colorPalette="teal" onClick={() => setDraft(blank(now))}>
               <LuPlus /> Add an exam
             </Button>
           }
@@ -617,10 +611,7 @@ export default function ExamsPage() {
                     onClick={() =>
                       setDraft({
                         ...draft,
-                        chapters: [
-                          ...draft.chapters,
-                          newRow(`Chapter ${draft.chapters.length + 1}`),
-                        ],
+                        chapters: [...draft.chapters, newRow()],
                       })
                     }
                   >
