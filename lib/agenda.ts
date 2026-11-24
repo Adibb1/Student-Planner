@@ -72,6 +72,7 @@ export function buildDayItems(dayStartMs: number, ctx: AgendaContext): DayItem[]
       done: b.status === "done",
       missed: isMissed(b, ctx.now) && task.status === "todo",
       locked: b.locked,
+      stretch: b.stretch,
     });
   }
 
@@ -88,7 +89,7 @@ export function itemColor(item: DayItem, subjects: Subject[]): string {
 export function findClashes(ctx: AgendaContext): Block[] {
   const clashes: Block[] = [];
   for (const b of ctx.blocks) {
-    if (b.status !== "planned" || b.locked) continue;
+    if (b.status !== "planned" || b.locked || b.stretch) continue; // late-night / relax sessions are on purpose
     const start = Date.parse(b.start);
     const end = Date.parse(b.end);
     if (end < ctx.now) continue;

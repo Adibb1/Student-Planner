@@ -39,6 +39,9 @@ export type ClassSession = {
   kind: ClassKind;
 };
 
+/** A daily time range, e.g. 08:00-12:00. */
+export type TimeWindow = { start: HHMM; end: HHMM };
+
 export type TaskKind = "assignment" | "study" | "quiz" | "project" | "other";
 export type Priority = "low" | "medium" | "high";
 
@@ -58,6 +61,14 @@ export type Task = {
   notes?: string;
   /** Set when the task was created by an exam study plan. */
   examId?: string | null;
+  /** The absolute last moment work may be planned (e.g. when an exam starts). Never planned after this. */
+  hardDueAt?: string | null;
+  /** Nothing is planned before this moment. */
+  startAfter?: string | null;
+  /** Preferred time of day for sessions (used when possible). */
+  window?: TimeWindow | null;
+  /** Allow using relax time and late nights when the work does not fit otherwise. */
+  allowOvertime?: boolean;
   createdAt: string;
   completedAt?: string | null;
 };
@@ -75,7 +86,12 @@ export type Block = {
   focusedMin?: number;
   /** Minutes added to the task's loggedMin when you ticked this session as done by hand. */
   creditedMin?: number;
+  /** Set when the session was squeezed into relax time or after your normal bed time. */
+  stretch?: "relax" | "late";
 };
+
+/** One chapter / topic of an exam with the time you want to spend on it. */
+export type Chapter = { id: string; name: string; minutes: number };
 
 export type Exam = {
   id: string;
@@ -85,8 +101,20 @@ export type Exam = {
   durationMin: number;
   venue?: string;
   topics: string[];
-  /** Total study time you think you need, in minutes. */
+  /** Total study time you think you need, in minutes (the sum of the chapters when chapters are used). */
   prepMin: number;
+  /** Chapters with their own study time. Older exams only have `topics`. */
+  chapters?: Chapter[];
+  /** Time kept at the end for past papers / a final recap (minutes, 0 = none). */
+  recapMin?: number;
+  /** Do not start studying before this moment (ISO). */
+  startFrom?: string | null;
+  /** Aim to finish all studying by this moment (ISO). Default: the evening before. */
+  finishBy?: string | null;
+  /** Preferred time of day for study sessions. */
+  window?: TimeWindow | null;
+  /** If it does not fit, use relax time and late nights (never after the exam). Default: on. */
+  allowOvertime?: boolean;
 };
 
 export type RoutineKind = "prayer" | "meal" | "bath" | "relax" | "other";
@@ -124,6 +152,10 @@ export type Settings = {
     classBufferMin: number;
     /** Most study time planned in a single day. */
     maxDailyStudyMin: number;
+    /** Allow the planner to use relax time and late nights when an exam / deadline cannot fit otherwise. */
+    allowStretch: boolean;
+    /** The latest the planner may schedule work at night, e.g. 03:00. */
+    latestBed: HHMM;
   };
   pomodoro: {
     focusMin: number;
@@ -176,4 +208,5 @@ export type DayItem = {
   done?: boolean;
   missed?: boolean;
   locked?: boolean;
+  stretch?: "relax" | "late";
 };

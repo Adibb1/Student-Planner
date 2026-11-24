@@ -43,6 +43,7 @@ import {
   type PlanResult,
   blockMinutes,
   buildStudyTasks,
+  examHardLimit,
   isMissed,
   isOverdue,
   planSchedule,
@@ -50,6 +51,7 @@ import {
   rescheduleMissed,
   startOfDay,
 } from "@/lib/scheduler";
+import { toastPlan } from "@/lib/notify";
 import { mergeSettings } from "@/lib/settings";
 import type {
   Block,
@@ -84,6 +86,20 @@ export type PlanSummary = {
   moved: number;
   /** Tasks that could not fit before their deadline. */
   short: { task: Task; missingMin: number }[];
+  /** Set when sessions were squeezed into relax time or late nights. */
+  stretch?: { relaxMin: number; lateMin: number; latestEnd: number | null };
+};
+
+/** What an exam plan would look like (nothing is saved). */
+export type StudyPreview = {
+  totalMin: number;
+  placedMin: number;
+  sessions: { title: string; start: number; end: number; stretch?: "relax" | "late" }[];
+  short: { title: string; missingMin: number }[];
+  stretch?: { relaxMin: number; lateMin: number; latestEnd: number | null };
+  warnings: string[];
+  /** The plan cannot be built at all (exam already started / no time left). */
+  empty: boolean;
 };
 
 type Alerts = {
@@ -137,6 +153,8 @@ type PlannerState = {
   updateExam: (id: string, patch: Partial<Omit<Exam, "id">>) => void;
   deleteExam: (id: string) => void;
   generateStudyPlan: (examId: string, examOverride?: Exam) => { tasks: number; plan: PlanSummary | null };
+  /** Shows what the plan for this exam would look like, without saving anything. */
+  previewStudyPlan: (exam: Exam) => StudyPreview;
 
   addProgress: (entry: ProgressEntry) => void;
 
@@ -260,6 +278,7 @@ export function PlannerProvider({ user, children }: { user: User; children: Reac
     short: result.unscheduled
       .map((u) => ({ task: taskList.find((t) => t.id === u.taskId) as Task, missingMin: u.missingMin }))
       .filter((u) => u.task),
+    stretch: result.stretch,
   }), []);
 
   /** Runs the scheduler on the latest data (plus optional "not saved yet" changes) and saves the result. */
@@ -284,9 +303,107 @@ export function PlannerProvider({ user, children }: { user: User; children: Reac
     [uid, summarize],
   );
 
+  // One-time repair: study tasks made by the older version had no "never after the exam" limit.
+  // Give them one, then re-plan so nothing stays scheduled past the exam.
+  const repaired = useRef(false);
+  useEffect(() => {
+    if (loadedCount < 7 || repaired.current) return;
+    repaired.current = true;
+    const t0 = Date.now();
+    const fixed: Task[] = [];
+    for (const t of tasks) {
+      if (!t.examId || t.status !== "todo" || t.hardDueAt) continue;
+      const exam = exams.find((e) => e.id === t.examId);
+      const start = exam ? Date.parse(exam.startsAt) : NaN;
+      if (!exam || !(start > t0)) continue;
+      const hard = examHardLimit(start, t0);
+      const patch = {
+        hardDueAt: new Date(hard).toISOString(),
+        dueAt: new Date(Math.min(Date.parse(t.dueAt), hard)).toISOString(),
+        allowOvertime: true,
+      };
+      patchDoc<Task>(uid, "tasks", t.id, patch);
+      fixed.push({ ...t, ...patch });
+    }
+    if (fixed.length === 0) return;
+    const fixedIds = new Map(fixed.map((t) => [t.id, t]));
+    toastPlan(replan("full", { tasks: tasks.map((t) => fixedIds.get(t.id) || t) }), "Exam study plan fixed");
+  }, [loadedCount, tasks, exams, uid, replan]);
+
   // ── Actions ────────────────────────────────────────────────────────────────────────
   const actions = useMemo(() => {
     const now0 = () => Date.now();
+
+    // `examOverride` lets a just-created / just-edited exam be planned before it has come back from the database.
+    const generateStudyPlan = (examId: string, examOverride?: Exam) => {
+      const s = stateRef.current;
+      const exam = examOverride ?? s.exams.find((e) => e.id === examId);
+      if (!exam) return { tasks: 0, plan: null as PlanSummary | null };
+
+      // Replace the old (unfinished) study tasks of this exam, but keep the time you already worked.
+      const old = s.tasks.filter((t) => t.examId === examId && t.status === "todo");
+      const oldIds = new Set(old.map((t) => t.id));
+      const oldBlocks = s.blocks.filter((b) => oldIds.has(b.taskId));
+      deleteTasksCascade(uid, old.map((t) => t.id), oldBlocks.map((b) => b.id));
+
+      const doneTitles = new Set(s.tasks.filter((t) => t.examId === examId && t.status === "done").map((t) => t.title));
+      const workedByTitle = new Map(old.map((t) => [t.title, t.loggedMin || 0]));
+      const drafts = buildStudyTasks(exam, s.subjects.find((x) => x.id === exam.subjectId), now0())
+        .filter((d) => !doneTitles.has(d.title))
+        .map((d) => ({ ...d, loggedMin: Math.min(d.estimateMin, workedByTitle.get(d.title) || 0) }));
+      const created: Task[] = drafts.map((d) => {
+        const id = newId(uid, "tasks");
+        setDocWithId<Task>(uid, "tasks", id, d);
+        return { ...d, id };
+      });
+
+      const keepTasks = s.tasks.filter((t) => !oldIds.has(t.id));
+      const plan = replan("incremental", {
+        tasks: [...keepTasks, ...created],
+        blocks: s.blocks.filter((b) => !oldIds.has(b.taskId)),
+      });
+      return { tasks: created.length, plan: plan as PlanSummary | null };
+    };
+
+    const previewStudyPlan = (exam: Exam): StudyPreview => {
+      const s = stateRef.current;
+      const t0 = now0();
+      const drafts = buildStudyTasks(exam, s.subjects.find((x) => x.id === exam.subjectId), t0).map((d, i) => ({
+        ...d,
+        id: `preview-${i}`,
+      })) as Task[];
+      if (drafts.length === 0) {
+        return { totalMin: 0, placedMin: 0, sessions: [], short: [], warnings: [], empty: true };
+      }
+      const oldIds = new Set(s.tasks.filter((t) => t.examId === exam.id && t.status === "todo").map((t) => t.id));
+      const result = planSchedule({
+        now: t0,
+        mode: "incremental",
+        settings: s.settings,
+        subjects: s.subjects,
+        classes: s.classes,
+        tasks: [...s.tasks.filter((t) => !oldIds.has(t.id)), ...drafts],
+        blocks: s.blocks.filter((b) => !oldIds.has(b.taskId)),
+      });
+      const title = (id: string) => drafts.find((d) => d.id === id)?.title || "";
+      const mine = result.create.filter((b) => b.taskId.startsWith("preview-"));
+      return {
+        totalMin: drafts.reduce((a, d) => a + d.estimateMin, 0),
+        placedMin: mine.reduce((a, b) => a + blockMinutes(b), 0),
+        sessions: mine
+          .map((b) => ({ title: title(b.taskId), start: Date.parse(b.start), end: Date.parse(b.end), stretch: b.stretch }))
+          .sort((a, b) => a.start - b.start),
+        short: result.unscheduled
+          .filter((u) => u.taskId.startsWith("preview-"))
+          .map((u) => ({ title: title(u.taskId), missingMin: u.missingMin })),
+        stretch: result.stretch,
+        warnings: result.warnings,
+        empty: false,
+      };
+    };
+
+    const toastPlanSoon = (r: { plan: PlanSummary | null }) => toastPlan(r.plan, "Exam plan updated");
+
 
     const plannedUnlockedIds = (taskId: string) =>
       stateRef.current.blocks.filter((b) => b.taskId === taskId && b.status === "planned" && !b.locked).map((b) => b.id);
@@ -386,7 +503,7 @@ export function PlannerProvider({ user, children }: { user: User; children: Reac
       ) => {
         const s = stateRef.current;
         const current = s.tasks.find((t) => t.id === id);
-        if (!current) return null;
+        if (!current) return;
         patchDoc<Task>(uid, "tasks", id, patch);
         if (!opts?.replan && !opts?.pin) return null;
 
@@ -472,38 +589,23 @@ export function PlannerProvider({ user, children }: { user: User; children: Reac
 
       // Exams
       addExam: (data: Omit<Exam, "id">) => createDoc<Exam>(uid, "exams", data),
-      updateExam: (id: string, patch: Partial<Omit<Exam, "id">>) => patchDoc<Exam>(uid, "exams", id, patch),
+      updateExam: (id: string, patch: Partial<Omit<Exam, "id">>) => {
+        patchDoc<Exam>(uid, "exams", id, patch);
+        // Changing the date, chapters or options must also change the plan (otherwise old sessions stay behind).
+        const s = stateRef.current;
+        const current = s.exams.find((e) => e.id === id);
+        if (!current) return;
+        const merged = { ...current, ...patch } as Exam;
+        const hasPlan = s.tasks.some((t) => t.examId === id);
+        if (hasPlan) toastPlanSoon(generateStudyPlan(id, merged));
+      },
       deleteExam: (id: string) => {
         const study = stateRef.current.tasks.filter((t) => t.examId === id).map((t) => t.id);
         if (study.length) deleteTaskIds(study);
         removeDoc(uid, "exams", id);
       },
-      // `examOverride` lets a just-created exam be planned before it has come back from the database.
-      generateStudyPlan: (examId: string, examOverride?: Exam) => {
-        const s = stateRef.current;
-        const exam = examOverride ?? s.exams.find((e) => e.id === examId);
-        if (!exam) return { tasks: 0, plan: null };
-
-        // Replace the old (unfinished) study tasks of this exam.
-        const old = s.tasks.filter((t) => t.examId === examId && t.status === "todo");
-        const oldIds = new Set(old.map((t) => t.id));
-        const oldBlocks = s.blocks.filter((b) => oldIds.has(b.taskId));
-        deleteTasksCascade(uid, old.map((t) => t.id), oldBlocks.map((b) => b.id));
-
-        const drafts = buildStudyTasks(exam, s.subjects.find((x) => x.id === exam.subjectId), now0());
-        const created: Task[] = drafts.map((d) => {
-          const id = newId(uid, "tasks");
-          setDocWithId<Task>(uid, "tasks", id, d);
-          return { ...d, id };
-        });
-
-        const keepTasks = s.tasks.filter((t) => !oldIds.has(t.id));
-        const plan = replan("incremental", {
-          tasks: [...keepTasks, ...created],
-          blocks: s.blocks.filter((b) => !oldIds.has(b.taskId)),
-        });
-        return { tasks: created.length, plan };
-      },
+      generateStudyPlan,
+      previewStudyPlan,
 
       // Focus timer: saves the minutes you worked (called every minute and when the timer stops).
       addProgress: (p: ProgressEntry) => {

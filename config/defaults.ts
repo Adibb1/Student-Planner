@@ -40,6 +40,8 @@ export function defaultSettings(timezone = "Asia/Kuala_Lumpur"): Settings {
       breakMin: 10,
       classBufferMin: 10,
       maxDailyStudyMin: 240,
+      allowStretch: true,
+      latestBed: "03:00",
     },
     pomodoro: {
       focusMin: 25,

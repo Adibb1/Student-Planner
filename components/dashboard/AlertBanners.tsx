@@ -3,8 +3,9 @@
 import { Box, Button, Flex, HStack, Stack, Text } from "@chakra-ui/react";
 import NextLink from "next/link";
 import { type ReactNode, useMemo } from "react";
-import { LuClock, LuFlame, LuRefreshCw, LuSparkles } from "react-icons/lu";
+import { LuClock, LuFlame, LuMoon, LuRefreshCw, LuSparkles } from "react-icons/lu";
 import { usePlanner } from "@/context/PlannerContext";
+import { fmtTime } from "@/lib/format";
 import { toastPlan } from "@/lib/notify";
 import { plannedMinutes, remainingMinutes } from "@/lib/scheduler";
 
@@ -52,7 +53,7 @@ function Banner({
 
 /** Things that need attention: missed sessions, overdue work, clashes, unplanned tasks. */
 export function AlertBanners() {
-  const { alerts, tasks, blocks, rescheduleMissedWork, autoSchedule } = usePlanner();
+  const { alerts, tasks, blocks, now, rescheduleMissedWork, autoSchedule } = usePlanner();
 
   const unplanned = useMemo(
     () =>
@@ -62,13 +63,39 @@ export function AlertBanners() {
     [tasks, blocks],
   );
 
+  // Sessions the planner squeezed into relax time / late nights (still ahead of you).
+  const stretched = useMemo(
+    () =>
+      blocks.filter(
+        (b) => b.stretch && b.status === "planned" && Date.parse(b.end) > now && tasks.find((t) => t.id === b.taskId)?.status === "todo",
+      ),
+    [blocks, tasks, now],
+  );
+  const lateCount = stretched.filter((b) => b.stretch === "late").length;
+  const latestEnd = stretched.reduce((m, b) => Math.max(m, Date.parse(b.end)), 0);
+
   const missed = alerts.missed.length;
   const clashes = alerts.clashes.length;
   const overdue = alerts.overdue.length;
-  if (!missed && !clashes && !overdue && unplanned.length === 0) return null;
+  if (!missed && !clashes && !overdue && unplanned.length === 0 && stretched.length === 0) return null;
 
   return (
     <Stack gap={3} mb={6}>
+      {stretched.length > 0 && (
+        <Banner
+          color="orange"
+          icon={<LuMoon />}
+          title="Tight schedule: study is squeezed into your rest time"
+          text={`${stretched.length} session${stretched.length === 1 ? "" : "s"} use your relax time${
+            lateCount > 0 ? ` or late nights (latest finish ${fmtTime(latestEnd)})` : ""
+          }. Get enough sleep when you can.`}
+          action={
+            <Button asChild colorPalette="orange" size="sm" variant="outline">
+              <NextLink href="/exams">Review exam plan</NextLink>
+            </Button>
+          }
+        />
+      )}
       {missed > 0 && (
         <Banner
           color="orange"

@@ -302,6 +302,19 @@ function SettingsForm() {
             <NumField label="Gap around classes" hint="Travel and settling time." value={s.scheduling.classBufferMin} min={0} max={60} onChange={(n) => set("scheduling", { classBufferMin: n })} />
             <NumField label="Most study per day" value={s.scheduling.maxDailyStudyMin} min={30} max={720} step={15} onChange={(n) => set("scheduling", { maxDailyStudyMin: n })} />
           </Box>
+          <Switch.Root colorPalette="teal" checked={s.scheduling.allowStretch} onCheckedChange={(e) => set("scheduling", { allowStretch: e.checked })}>
+            <Switch.HiddenInput />
+            <Switch.Control />
+            <Switch.Label>When an exam is too close, use relax time and late nights</Switch.Label>
+          </Switch.Root>
+          {s.scheduling.allowStretch && (
+            <FormField
+              label="Latest night study (emergency only)"
+              hint="The planner fills normal free time first, then your relax time, and only then hours after bed time, never later than this and never after the exam starts."
+            >
+              <Input type="time" value={s.scheduling.latestBed} w="40" onChange={(e) => set("scheduling", { latestBed: e.target.value || "03:00" })} />
+            </FormField>
+          )}
         </SectionCard>
 
         {/* Pomodoro */}

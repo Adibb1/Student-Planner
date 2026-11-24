@@ -94,6 +94,11 @@ export function AgendaRow({ item }: { item: DayItem }) {
             Missed
           </Badge>
         )}
+        {item.stretch && isStudy && !item.done && (
+          <Badge colorPalette={item.stretch === "late" ? "red" : "orange"} variant="subtle">
+            {item.stretch === "late" ? "Late night" : "Relax time"}
+          </Badge>
+        )}
         {item.locked && isStudy && !item.done && (
           <Badge colorPalette="gray" variant="outline" display={{ base: "none", sm: "inline-flex" }}>
             Fixed

@@ -11,15 +11,17 @@
 //  4. If something cannot fit, it is reported in `unscheduled` instead of being hidden.
 
 import type { Block, ClassSession, Settings, Subject, Task } from "../types";
-import { type FreeSlot, freeSlotsForDay } from "./freeTime";
+import { type FreeSlot, type StretchSlot, freeSlotsForDay, stretchSlotsForDay } from "./freeTime";
 import { blockMinutes, plannedMinutes, remainingMinutes } from "./progress";
 import {
   DAY,
   type Interval,
   MIN,
   addDays,
+  atTime,
   ceilTo,
   floorMinutes,
+  intersect,
   startOfDay,
   subtractIntervals,
 } from "./time";
@@ -48,6 +50,8 @@ export type PlanResult = {
   removeIds: string[];
   unscheduled: { taskId: string; missingMin: number }[];
   warnings: string[];
+  /** Set when sessions had to be squeezed into relax time or late nights. */
+  stretch?: { relaxMin: number; lateMin: number; latestEnd: number | null };
 };
 
 const MAX_HORIZON_DAYS = 60;
@@ -82,6 +86,9 @@ export function splitSessions(total: number, cfg: Settings["scheduling"]): numbe
   }
   return out;
 }
+
+/** Late-night sessions are given up first, then relax-time ones, then normal ones. */
+const stretchRank = (b: Pick<Block, "stretch">) => (b.stretch === "late" ? 2 : b.stretch === "relax" ? 1 : 0);
 
 /** Cuts `cut` out of every slot but keeps each slot's subject tag. */
 function carve(slots: FreeSlot[], cut: Interval): FreeSlot[] {
@@ -140,7 +147,7 @@ export function planSchedule(input: PlanInput): PlanResult {
     if (excess < 5) continue; // ignore rounding differences
     const latestFirst = keep
       .filter((b) => b.taskId === t.id && b.status === "planned" && !b.locked && Date.parse(b.start) > now)
-      .sort((a, b) => Date.parse(b.start) - Date.parse(a.start));
+      .sort((a, b) => stretchRank(b) - stretchRank(a) || Date.parse(b.start) - Date.parse(a.start));
     for (const b of latestFirst) {
       if (excess < 5) break;
       const len = blockMinutes(b);
@@ -159,6 +166,7 @@ export function planSchedule(input: PlanInput): PlanResult {
           end: new Date(Date.parse(b.start) + newLen * MIN).toISOString(),
           status: "planned",
           locked: false,
+          ...(b.stretch ? { stretch: b.stretch } : {}),
         };
         pendingCreate.push(shorter);
         keep.push({ ...shorter, id: `trim-${b.id}` });
@@ -168,23 +176,40 @@ export function planSchedule(input: PlanInput): PlanResult {
   if (mode === "trim") return { create: pendingCreate, removeIds, unscheduled: [], warnings };
 
   // ── 2. What is still left for each task ──────────────────────────────────────────────
-  const deadlineOf = (t: Task) => {
+  // `soft` = the deadline you gave, `hard` = the very last moment work may be planned
+  // (e.g. when the exam starts). Without a hard limit the two are the same.
+  const hardOf = (t: Task) => (t.hardDueAt ? Date.parse(t.hardDueAt) : null);
+  const softOf = (t: Task) => {
     const due = Date.parse(t.dueAt);
-    return due > now ? due : now + OVERDUE_GRACE_DAYS * DAY;
+    const hard = hardOf(t);
+    if (due > now) return hard !== null ? Math.min(due, hard) : due;
+    // already overdue: with a hard limit use it, otherwise a short grace period
+    return hard !== null ? hard : now + OVERDUE_GRACE_DAYS * DAY;
   };
   const priorityWeight = { high: 0, medium: 1, low: 2 } as const;
+  const stretchAllowed = cfg.allowStretch !== false;
 
   const work = todo
-    .map((t) => ({
-      task: t,
-      left: Math.max(0, remainingMinutes(t, keep) - plannedMinutes(t.id, keep)),
-      overdue: Date.parse(t.dueAt) <= now,
-      deadline: deadlineOf(t),
-    }))
+    .filter((t) => {
+      const hard = hardOf(t);
+      return hard === null || hard > earliest + 10 * MIN; // nothing can be planned after the exam started
+    })
+    .map((t) => {
+      const soft = softOf(t);
+      const hard = hardOf(t);
+      return {
+        task: t,
+        left: Math.max(0, remainingMinutes(t, keep) - plannedMinutes(t.id, keep)),
+        overdue: Date.parse(t.dueAt) <= now && hard === null,
+        soft,
+        hard: hard !== null ? Math.max(hard, soft) : soft,
+        canStretch: stretchAllowed && hard !== null && t.allowOvertime !== false,
+      };
+    })
     .filter((w) => w.left > 0)
     .sort((a, b) => {
       if (a.overdue !== b.overdue) return a.overdue ? -1 : 1;
-      if (a.deadline !== b.deadline) return a.deadline - b.deadline;
+      if (a.soft !== b.soft) return a.soft - b.soft;
       return priorityWeight[a.task.priority] - priorityWeight[b.task.priority];
     });
 
@@ -211,26 +236,58 @@ export function planSchedule(input: PlanInput): PlanResult {
     return slots;
   };
 
-  // ── 4. Place sessions ───────────────────────────────────────────────────────────────
+  // Emergency time (relax + late night), only used when everything else is full.
+  const stretchCache = new Map<number, StretchSlot[]>();
+  const stretchOf = (day: number): StretchSlot[] => {
+    let slots = stretchCache.get(day);
+    if (!slots) {
+      slots = stretchSlotsForDay(day, { settings, classes, obstacles: keptIntervals })
+        .map((s) => (s.start < earliest ? { ...s, start: Math.min(s.end, earliest) } : s))
+        .filter((s) => s.end - s.start >= 10 * MIN);
+      stretchCache.set(day, slots);
+    }
+    return slots;
+  };
+  const stretchLoad = new Map<number, number>(); // emergency minutes used per day (to spread them)
+  const stretchStats = { relaxMin: 0, lateMin: 0, latestEnd: null as number | null };
+
+  const inWindow = (slot: Interval, day: number, w: Task["window"]): Interval | null => {
+    if (!w) return slot;
+    const a = atTime(day, w.start);
+    let b = atTime(day, w.end);
+    if (b <= a) b = atTime(addDays(day, 1), w.end);
+    return intersect(slot, { start: a, end: b });
+  };
+
+  const missingOf = new Map<string, number>();
+  const addMissing = (id: string, min: number) => missingOf.set(id, (missingOf.get(id) || 0) + min);
+  const leftovers: { w: (typeof work)[number]; want: number }[] = [];
+
+  // ── 4. Place sessions in normal free time ───────────────────────────────────────────
   for (const w of work) {
-    const { task, deadline } = w;
-    const lastDay = Math.min(startOfDay(deadline), addDays(today, MAX_HORIZON_DAYS));
-    const days: number[] = [];
-    for (let d = today; d <= lastDay; d = addDays(d, 1)) days.push(d);
+    const { task } = w;
+    const startAfter = task.startAfter ? Date.parse(task.startAfter) : 0;
+    const dayList = (limit: number) => {
+      const lastDay = Math.min(startOfDay(limit), addDays(today, MAX_HORIZON_DAYS));
+      const list: number[] = [];
+      for (let d = today; d <= lastDay; d = addDays(d, 1)) if (d + DAY > startAfter) list.push(d);
+      return list;
+    };
+    const softDays = dayList(w.soft);
+    const hardDays = dayList(w.hard);
 
     const queue = splitSessions(w.left, cfg);
     const total = queue.length;
-    const perDayCap = cfg.strategy === "early" ? Infinity : Math.max(1, Math.ceil(total / days.length));
+    const perDayCap = cfg.strategy === "early" ? Infinity : Math.max(1, Math.ceil(total / Math.max(1, softDays.length)));
     const perDayCount = new Map<number, number>();
-    let missing = 0;
     let k = 0;
 
     type Placement = { day: number; start: number; len: number };
 
     // Looks for a place for one session. pass 1 = follow every preference,
-    // pass 2 = allow several sessions per day and other subjects' reserved time,
+    // pass 2 = allow several sessions per day, other subjects' reserved time and any time of day,
     // pass 3 = also ignore the daily study limit (better than missing the deadline).
-    const findSlot = (pass: 1 | 2 | 3, want: number, order: number[]): Placement | null => {
+    const findSlot = (pass: 1 | 2 | 3, want: number, order: number[], days: number[], limit: number): Placement | null => {
       const minUseful = Math.min(want, cfg.minSessionMin);
       for (const idx of order) {
         const day = days[idx];
@@ -242,11 +299,14 @@ export function planSchedule(input: PlanInput): PlanResult {
           Math.min(floorMinutes((s.end - s.start) / MIN, 5), floorMinutes(capLeft, 5));
 
         const candidates = slotsOf(day)
-          .map((s) => ({
-            start: ceilTo(s.start, 5),
-            end: Math.min(s.end, deadline),
-            rank: s.subjectId && s.subjectId === task.subjectId ? 0 : s.subjectId === null ? 1 : 2,
-          }))
+          .map((s) => {
+            const clipped = pass === 1 ? inWindow(s, day, task.window) : s;
+            return {
+              start: Math.max(ceilTo(clipped ? clipped.start : s.start, 5), ceilTo(startAfter, 5)),
+              end: clipped ? Math.min(clipped.end, limit) : 0,
+              rank: s.subjectId && s.subjectId === task.subjectId ? 0 : s.subjectId === null ? 1 : 2,
+            };
+          })
           .filter((s) => s.end - s.start >= 10 * MIN && (pass > 1 || s.rank < 2))
           .sort((a, b) => a.rank - b.rank || a.start - b.start);
 
@@ -262,42 +322,134 @@ export function planSchedule(input: PlanInput): PlanResult {
       return null;
     };
 
-    while (queue.length > 0) {
-      const want = queue.shift() as number;
-      const order = dayOrder(k, total, days.length, cfg.strategy);
-      const placed = findSlot(1, want, order) || findSlot(2, want, order) || findSlot(3, want, order);
-
-      if (!placed || placed.len <= 0) {
-        missing += want;
-        k++;
-        continue;
-      }
-
-      const end = placed.start + placed.len * MIN;
+    const commit = (p: Placement, stretch?: "relax" | "late") => {
+      const end = p.start + p.len * MIN;
       result.create.push({
         taskId: task.id,
-        start: new Date(placed.start).toISOString(),
+        start: new Date(p.start).toISOString(),
         end: new Date(end).toISOString(),
         status: "planned",
         locked: false,
+        ...(stretch ? { stretch } : {}),
       });
-
       // The time is taken now (plus a break afterwards) – remove it from the day's free list.
-      slotCache.set(
-        placed.day,
-        carve(slotsOf(placed.day), { start: placed.start, end: end + cfg.breakMin * MIN }),
+      const cut = { start: p.start, end: end + cfg.breakMin * MIN };
+      slotCache.set(p.day, carve(slotsOf(p.day), cut));
+      stretchCache.set(
+        p.day,
+        stretchOf(p.day).flatMap((s) =>
+          subtractIntervals([{ start: s.start, end: s.end }], [cut]).map((x) => ({ ...x, kind: s.kind })),
+        ),
       );
-      dayLoad.set(placed.day, (dayLoad.get(placed.day) || 0) + placed.len);
-      perDayCount.set(placed.day, (perDayCount.get(placed.day) || 0) + 1);
+      dayLoad.set(p.day, (dayLoad.get(p.day) || 0) + p.len);
+      perDayCount.set(p.day, (perDayCount.get(p.day) || 0) + 1);
+    };
 
+    while (queue.length > 0) {
+      const want = queue.shift() as number;
+      const order = dayOrder(k, total, softDays.length, cfg.strategy);
+      let placed: Placement | null = null;
+      if (softDays.length > 0) {
+        placed = findSlot(1, want, order, softDays, w.soft) || findSlot(2, want, order, softDays, w.soft) || findSlot(3, want, order, softDays, w.soft);
+      }
+      // Not before the deadline you set? Use normal free time up to the hard limit (exam start).
+      if (!placed && w.hard > w.soft) {
+        const all = hardDays.map((_, i) => i);
+        placed = findSlot(2, want, all, hardDays, w.hard) || findSlot(3, want, all, hardDays, w.hard);
+      }
+
+      if (!placed || placed.len <= 0) {
+        if (w.canStretch) leftovers.push({ w, want });
+        else addMissing(task.id, want);
+        k++;
+        continue;
+      }
+      commit(placed);
       if (placed.len < want) queue.unshift(want - placed.len); // split the session
       else k++;
     }
+  }
 
-    if (missing > 0) {
-      result.unscheduled.push({ taskId: task.id, missingMin: missing });
-      warnings.push(`Not enough free time before the deadline for "${task.title}" (${missing} min short).`);
+  // ── 5. Emergency: relax time first, then late nights, spread over the days ───────────
+  // Cost per minute: relax 1, late night 2 → 6.5 (23:00 → 03:00), plus a penalty for every
+  // emergency hour already used that day, so the load is shared instead of piled on one night.
+  const LATE_BASE = 2;
+  const costOf = (s: StretchSlot, start: number, len: number, day: number) => {
+    let c: number;
+    if (s.kind === "relax") c = 1;
+    else {
+      const bed = atTime(day, settings.bed) <= atTime(day, settings.wake) ? atTime(addDays(day, 1), settings.bed) : atTime(day, settings.bed);
+      const mid = start + (len * MIN) / 2;
+      c = LATE_BASE + Math.max(0, (mid - bed) / (60 * MIN)) * 1.5;
     }
+    return c + ((stretchLoad.get(day) || 0) / 60) * 0.8;
+  };
+
+  for (const { w, want: first } of leftovers) {
+    const { task } = w;
+    const startAfter = task.startAfter ? Date.parse(task.startAfter) : 0;
+    const firstDay = startOfDay(Math.max(now, startAfter)) - DAY; // yesterday's late night may still be ahead
+    const lastDay = Math.min(startOfDay(w.hard), addDays(today, MAX_HORIZON_DAYS));
+    const queue = [first];
+    while (queue.length > 0) {
+      const want = queue.shift() as number;
+      let best: { day: number; start: number; len: number; kind: "relax" | "late"; score: number } | null = null;
+      for (let d = firstDay; d <= lastDay; d = addDays(d, 1)) {
+        for (const s of stretchOf(d)) {
+          const start = Math.max(ceilTo(s.start, 5), ceilTo(startAfter, 5));
+          const end = Math.min(s.end, w.hard);
+          const len = Math.min(want, floorMinutes((end - start) / MIN, 5));
+          if (len < Math.min(want, cfg.minSessionMin)) continue;
+          // prefer fitting the whole session, then the cheapest slot
+          const score = costOf(s, start, len, d) + (len < want ? 0.7 : 0);
+          if (!best || score < best.score - 1e-9) best = { day: d, start, len, kind: s.kind, score };
+        }
+      }
+      if (!best) {
+        addMissing(task.id, want);
+        continue;
+      }
+      const end = best.start + best.len * MIN;
+      result.create.push({
+        taskId: task.id,
+        start: new Date(best.start).toISOString(),
+        end: new Date(end).toISOString(),
+        status: "planned",
+        locked: false,
+        stretch: best.kind,
+      });
+      const cut = { start: best.start, end: end + cfg.breakMin * MIN };
+      stretchCache.set(
+        best.day,
+        stretchOf(best.day).flatMap((s) =>
+          subtractIntervals([{ start: s.start, end: s.end }], [cut]).map((x) => ({ ...x, kind: s.kind })),
+        ),
+      );
+      stretchLoad.set(best.day, (stretchLoad.get(best.day) || 0) + best.len);
+      dayLoad.set(startOfDay(best.start), (dayLoad.get(startOfDay(best.start)) || 0) + best.len);
+      if (best.kind === "relax") stretchStats.relaxMin += best.len;
+      else stretchStats.lateMin += best.len;
+      stretchStats.latestEnd = Math.max(stretchStats.latestEnd ?? 0, end);
+      if (best.len < want) queue.unshift(want - best.len);
+    }
+  }
+
+  // ── 6. Report ────────────────────────────────────────────────────────────────────────
+  for (const [taskId, missing] of missingOf) {
+    const t = todo.find((x) => x.id === taskId) as Task;
+    result.unscheduled.push({ taskId, missingMin: missing });
+    warnings.push(
+      t.hardDueAt
+        ? `"${t.title}" does not fit before the deadline (${missing} min short), even using relax time and late nights.`
+        : `Not enough free time before the deadline for "${t.title}" (${missing} min short).`,
+    );
+  }
+  if (stretchStats.relaxMin + stretchStats.lateMin > 0) {
+    result.stretch = stretchStats;
+    const parts: string[] = [];
+    if (stretchStats.relaxMin) parts.push(`${stretchStats.relaxMin} min of your relax time`);
+    if (stretchStats.lateMin) parts.push(`${stretchStats.lateMin} min after your normal bed time`);
+    warnings.push(`Tight schedule: used ${parts.join(" and ")} to fit your study plan before the exam.`);
   }
 
   return result;

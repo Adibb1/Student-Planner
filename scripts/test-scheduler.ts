@@ -28,6 +28,8 @@ const at = (daysFromToday: number, hhmm: string) => atTime(addDays(today, daysFr
 const iso = (ms: number) => new Date(ms).toISOString();
 
 const settings = defaultSettings();
+const HOURMS = 3_600_000;
+const DAYMS = 86_400_000;
 
 const subjects: Subject[] = [
   { id: "math", name: "Math", color: "teal", studySlots: [{ day: 4, start: "08:00", end: "09:00" }] }, // Thursday 8-9
@@ -260,6 +262,73 @@ for (const strategy of ["balanced", "early"] as const) {
   for (const [text, want] of cases) assert.equal(parseDuration(text), want, `parseDuration("${text}")`);
   assert.equal(parseDuration(formatDurationShort(75)), 75);
   console.log("✓ typed durations understood");
+}
+
+// ── 11. Exam tomorrow morning: never after the exam, relax first, late nights as a last resort ──
+{
+  const tue = new Date(2026, 10, 24, 11, 24).getTime(); // Tuesday 11:24
+  const examAt = atTime(addDays(startOfDay(tue), 1), "09:00");
+  const tueClasses: ClassSession[] = [
+    { id: "x1", subjectId: "phy", day: 2, start: "14:00", end: "16:00", kind: "lecture" },
+  ];
+  const mkExam = (mins: number[], extra: Partial<Exam> = {}): Exam => ({
+    id: "ex", subjectId: "math", title: "Math quiz", startsAt: iso(examAt), durationMin: 60, topics: [],
+    prepMin: mins.reduce((a, b) => a + b, 0),
+    chapters: mins.map((m, i) => ({ id: `c${i}`, name: `Chapter ${i + 1}`, minutes: m })),
+    ...extra,
+  });
+  const run = (exam: Exam, st = settings) => {
+    const drafts = buildStudyTasks(exam, subjects[0], tue).map((d, i) => ({ ...d, id: `s${i}` }));
+    const plan = planSchedule({ now: tue, mode: "full", settings: st, subjects, classes: tueClasses, tasks: drafts, blocks: [] });
+    return { drafts, plan };
+  };
+
+  // (a) Fits normally: 4 chapters × 45 min → no stretch, all before the exam.
+  const a = run(mkExam([45, 45, 45, 45]));
+  assert.equal(a.drafts.length, 4);
+  assert.ok(a.plan.create.every((b) => Date.parse(b.end) <= examAt - 50 * MIN), "nothing after the exam (a)");
+  assert.equal(a.plan.stretch, undefined, "no stretch needed for a light plan");
+  assert.equal(a.plan.unscheduled.length, 0);
+
+  // (b) Heavy plan: 4 × 150 min = 10 h. Needs relax time (and maybe late nights), still before the exam.
+  const b = run(mkExam([150, 150, 150, 150]));
+  const placedB = b.plan.create.reduce((s, x) => s + minutes(x), 0);
+  assert.ok(b.plan.create.every((x) => Date.parse(x.end) <= examAt - 50 * MIN), "nothing after the exam (b)");
+  assert.ok(b.plan.create.every((x) => Date.parse(x.end) <= atTime(addDays(startOfDay(tue), 1), "03:00")
+    || Date.parse(x.start) >= atTime(addDays(startOfDay(tue), 1), "05:45")), "never between 03:00 and wake-up");
+  assert.ok(b.plan.stretch, "stretch used and reported");
+  assert.ok(b.plan.warnings.some((w) => w.includes("Tight schedule")), "warning given");
+  assert.equal(placedB + b.plan.unscheduled.reduce((s, u) => s + u.missingMin, 0), 600);
+  const relaxB = b.plan.create.filter((x) => x.stretch === "relax").length;
+  const lateB = b.plan.create.filter((x) => x.stretch === "late").length;
+  console.log(`  heavy plan: ${placedB} min placed, relax sessions ${relaxB}, late sessions ${lateB}, short ${b.plan.unscheduled.length}`);
+
+  // (c) A medium overload that relax time alone can absorb must not touch the night.
+  //     Free time today after class is roughly 17:20-23:00; ask for just a bit more than normal time offers.
+  const noStretch = run(mkExam([150, 150, 150, 150]), { ...settings, scheduling: { ...settings.scheduling, allowStretch: false } });
+  const normalMin = noStretch.plan.create.reduce((s, x) => s + minutes(x), 0);
+  const need = normalMin + 40;
+  const c = run(mkExam([need / 2, need / 2].map((m) => Math.ceil(m / 5) * 5)));
+  assert.ok(c.plan.stretch && c.plan.stretch.lateMin === 0 && c.plan.stretch.relaxMin > 0, `relax is used before late nights (${JSON.stringify(c.plan.stretch)})`);
+  assert.equal(c.plan.unscheduled.length, 0);
+
+  // (d) Overtime switched off: no stretch, and a clear shortfall warning instead.
+  const d = run(mkExam([150, 150, 150, 150], { allowOvertime: false }));
+  assert.equal(d.plan.stretch, undefined);
+  assert.ok(d.plan.unscheduled.length > 0);
+  assert.ok(d.plan.create.every((x) => !x.stretch));
+
+  // (e) "Start from" and a preferred time window are honoured.
+  const e = run(mkExam([60, 60], { startFrom: iso(atTime(startOfDay(tue), "18:00")), window: { start: "20:00", end: "23:00" } }));
+  assert.ok(e.plan.create.every((x) => Date.parse(x.start) >= atTime(startOfDay(tue), "18:00")), "start from respected");
+  assert.ok(e.plan.create.some((x) => new Date(x.start).getHours() >= 20), "window preferred");
+
+  // (f) Exam already started → no tasks. Old stale plan (exam moved earlier) is never planned past the exam.
+  assert.equal(buildStudyTasks(mkExam([60], { startsAt: iso(tue - HOURMS) }), subjects[0], tue).length, 0);
+  const stale = a.drafts.map((d, i) => ({ ...d, id: `old${i}`, dueAt: iso(tue - DAYMS) })); // overdue soft date
+  const sp = planSchedule({ now: tue, mode: "full", settings, subjects, classes: tueClasses, tasks: stale, blocks: [] });
+  assert.ok(sp.create.every((x) => Date.parse(x.end) <= examAt), "overdue exam tasks never run past the exam");
+  console.log("✓ exam plan: never after the exam, relax before late nights, options respected");
 }
 
 console.log("\nAll scheduler checks passed.");

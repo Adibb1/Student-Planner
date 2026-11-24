@@ -92,3 +92,47 @@ export function freeSlotsForDay(dayStart: number, input: FreeTimeInput): FreeSlo
   for (const r of reserved) all.push(r);
   return all.sort((a, b) => a.start - b.start);
 }
+
+/** Time that is normally off-limits but can be used in an emergency (exam tomorrow). */
+export type StretchSlot = Interval & { kind: "relax" | "late" };
+
+/**
+ * Emergency slots for one day: your relax time, and the hours after your bed time
+ * up to `latestBed` (e.g. 03:00). Classes and already-taken time are still respected.
+ */
+export function stretchSlotsForDay(
+  dayStart: number,
+  input: Pick<FreeTimeInput, "settings" | "classes" | "obstacles">,
+): StretchSlot[] {
+  const { settings, classes, obstacles } = input;
+  const window = dayWindow(dayStart, settings);
+  const classBusy = classIntervals(dayStart, classes, settings.scheduling.classBufferMin);
+  const out: StretchSlot[] = [];
+
+  // 1. Relax time (inside the waking day).
+  const relax = settings.routine
+    .filter((r) => r.kind === "relax" && r.days.includes(weekdayOf(dayStart)))
+    .map((r) => ({ start: atTime(dayStart, r.start), end: atTime(dayStart, r.end) }));
+  const otherRoutine = routineIntervals(
+    dayStart,
+    settings.routine.filter((r) => r.kind !== "relax"),
+  );
+  for (const r of relax) {
+    const clipped = intersect(r, window);
+    if (!clipped) continue;
+    for (const piece of subtractIntervals([clipped], [...classBusy, ...otherRoutine, ...obstacles])) {
+      if (piece.end - piece.start >= 10 * MIN) out.push({ ...piece, kind: "relax" });
+    }
+  }
+
+  // 2. Late night: from bed time to the latest allowed time.
+  const latest = settings.scheduling.latestBed || "03:00";
+  let lateEnd = atTime(dayStart, latest);
+  if (parseHHMM(latest) <= parseHHMM(settings.wake)) lateEnd = atTime(addDays(dayStart, 1), latest);
+  if (lateEnd > window.end) {
+    for (const piece of subtractIntervals([{ start: window.end, end: lateEnd }], [...obstacles])) {
+      if (piece.end - piece.start >= 10 * MIN) out.push({ ...piece, kind: "late" });
+    }
+  }
+  return out.sort((a, b) => a.start - b.start);
+}

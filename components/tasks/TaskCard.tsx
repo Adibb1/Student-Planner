@@ -135,6 +135,7 @@ export function TaskCard({ task, onEdit }: { task: Task; onEdit: (task: Task) =>
                           {b.focusedMin ? ` · ${fmtDuration(b.focusedMin)} worked` : ""}
                           {missed ? " · missed" : ""}
                           {b.locked ? " · fixed time" : ""}
+                          {b.stretch === "late" ? " · late night" : b.stretch === "relax" ? " · uses relax time" : ""}
                         </Text>
                       </Stack>
                       <IconButton
