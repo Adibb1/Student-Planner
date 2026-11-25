@@ -151,7 +151,8 @@ type PlannerState = {
   addSession: (taskId: string, start: number, end: number) => void;
 
   addExam: (data: Omit<Exam, "id">) => string;
-  updateExam: (id: string, patch: Partial<Omit<Exam, "id">>) => void;
+  /** `replan: true` also rebuilds the exam's study plan (finished chapters are kept as they are). */
+  updateExam: (id: string, patch: Partial<Omit<Exam, "id">>, opts?: { replan?: boolean }) => void;
   deleteExam: (id: string) => void;
   generateStudyPlan: (examId: string, examOverride?: Exam) => { tasks: number; plan: PlanSummary | null };
   /** Shows what the plan for this exam would look like, without saving anything. */
@@ -337,23 +338,38 @@ export function PlannerProvider({ user, children }: { user: User; children: Reac
   const actions = useMemo(() => {
     const now0 = () => Date.now();
 
+    /**
+     * The study tasks an exam needs right now. Chapters you already finished are left alone,
+     * and the time you already worked on the others is kept.
+     */
+    const draftsForExam = (exam: Exam) => {
+      const s = stateRef.current;
+      const subject = s.subjects.find((x) => x.id === exam.subjectId);
+      const mine = s.tasks.filter((t) => t.examId === exam.id);
+      const old = mine.filter((t) => t.status === "todo");
+      const done = mine.filter((t) => t.status === "done");
+      const sameChapter = (t: Task, d: { chapterId?: string | null; title: string }) =>
+        t.chapterId && d.chapterId ? t.chapterId === d.chapterId : t.title === d.title;
+      const drafts = buildStudyTasks(exam, subject, now0())
+        .filter((d) => !done.some((t) => sameChapter(t, d)))
+        .map((d) => {
+          const before = old.find((t) => sameChapter(t, d));
+          return { ...d, loggedMin: Math.min(d.estimateMin, before?.loggedMin || 0) };
+        });
+      return { drafts, old };
+    };
+
     // `examOverride` lets a just-created / just-edited exam be planned before it has come back from the database.
     const generateStudyPlan = (examId: string, examOverride?: Exam) => {
       const s = stateRef.current;
       const exam = examOverride ?? s.exams.find((e) => e.id === examId);
       if (!exam) return { tasks: 0, plan: null as PlanSummary | null };
 
-      // Replace the old (unfinished) study tasks of this exam, but keep the time you already worked.
-      const old = s.tasks.filter((t) => t.examId === examId && t.status === "todo");
+      const { drafts, old } = draftsForExam(exam);
       const oldIds = new Set(old.map((t) => t.id));
       const oldBlocks = s.blocks.filter((b) => oldIds.has(b.taskId));
       deleteTasksCascade(uid, old.map((t) => t.id), oldBlocks.map((b) => b.id));
 
-      const doneTitles = new Set(s.tasks.filter((t) => t.examId === examId && t.status === "done").map((t) => t.title));
-      const workedByTitle = new Map(old.map((t) => [t.title, t.loggedMin || 0]));
-      const drafts = buildStudyTasks(exam, s.subjects.find((x) => x.id === exam.subjectId), now0())
-        .filter((d) => !doneTitles.has(d.title))
-        .map((d) => ({ ...d, loggedMin: Math.min(d.estimateMin, workedByTitle.get(d.title) || 0) }));
       const created: Task[] = drafts.map((d) => {
         const id = newId(uid, "tasks");
         setDocWithId<Task>(uid, "tasks", id, d);
@@ -371,10 +387,8 @@ export function PlannerProvider({ user, children }: { user: User; children: Reac
     const previewStudyPlan = (exam: Exam): StudyPreview => {
       const s = stateRef.current;
       const t0 = now0();
-      const drafts = buildStudyTasks(exam, s.subjects.find((x) => x.id === exam.subjectId), t0).map((d, i) => ({
-        ...d,
-        id: `preview-${i}`,
-      })) as Task[];
+      const { drafts: rawDrafts } = draftsForExam(exam);
+      const drafts = rawDrafts.map((d, i) => ({ ...d, id: `preview-${i}` })) as Task[];
       if (drafts.length === 0) {
         return { totalMin: 0, placedMin: 0, sessions: [], short: [], warnings: [], empty: true };
       }
@@ -391,7 +405,7 @@ export function PlannerProvider({ user, children }: { user: User; children: Reac
       const title = (id: string) => drafts.find((d) => d.id === id)?.title || "";
       const mine = result.create.filter((b) => b.taskId.startsWith("preview-"));
       return {
-        totalMin: drafts.reduce((a, d) => a + d.estimateMin, 0),
+        totalMin: drafts.reduce((a, d) => a + Math.max(0, d.estimateMin - (d.loggedMin || 0)), 0),
         placedMin: mine.reduce((a, b) => a + blockMinutes(b), 0),
         sessions: mine
           .map((b) => ({ title: title(b.taskId), start: Date.parse(b.start), end: Date.parse(b.end), stretch: b.stretch }))
@@ -637,15 +651,13 @@ export function PlannerProvider({ user, children }: { user: User; children: Reac
 
       // Exams
       addExam: (data: Omit<Exam, "id">) => createDoc<Exam>(uid, "exams", data),
-      updateExam: (id: string, patch: Partial<Omit<Exam, "id">>) => {
+      updateExam: (id: string, patch: Partial<Omit<Exam, "id">>, opts?: { replan?: boolean }) => {
         patchDoc<Exam>(uid, "exams", id, patch);
-        // Changing the date, chapters or options must also change the plan (otherwise old sessions stay behind).
-        const s = stateRef.current;
-        const current = s.exams.find((e) => e.id === id);
+        // Only rebuilds the plan when asked to, so a small edit never moves your sessions around.
+        if (!opts?.replan) return;
+        const current = stateRef.current.exams.find((e) => e.id === id);
         if (!current) return;
-        const merged = { ...current, ...patch } as Exam;
-        const hasPlan = s.tasks.some((t) => t.examId === id);
-        if (hasPlan) toastPlanSoon(generateStudyPlan(id, merged));
+        toastPlanSoon(generateStudyPlan(id, { ...current, ...patch } as Exam));
       },
       deleteExam: (id: string) => {
         const study = stateRef.current.tasks.filter((t) => t.examId === id).map((t) => t.id);

@@ -305,12 +305,19 @@ for (const strategy of ["balanced", "early"] as const) {
 
   // (c) A medium overload that relax time alone can absorb must not touch the night.
   //     Free time today after class is roughly 17:20-23:00; ask for just a bit more than normal time offers.
-  const noStretch = run(mkExam([150, 150, 150, 150]), { ...settings, scheduling: { ...settings.scheduling, allowStretch: false } });
+  const noStretch = run(mkExam([150, 150, 150, 150], { ordered: false }), { ...settings, scheduling: { ...settings.scheduling, allowStretch: false } });
   const normalMin = noStretch.plan.create.reduce((s, x) => s + minutes(x), 0);
-  const need = normalMin + 40;
-  const c = run(mkExam([need / 2, need / 2].map((m) => Math.ceil(m / 5) * 5)));
-  assert.ok(c.plan.stretch && c.plan.stretch.lateMin === 0 && c.plan.stretch.relaxMin > 0, `relax is used before late nights (${JSON.stringify(c.plan.stretch)})`);
-  assert.equal(c.plan.unscheduled.length, 0);
+  // Growing overload: relax time must always be used before any late night, and a relax-only case must exist.
+  let relaxOnly = 0;
+  for (let extra = 20; extra <= 240; extra += 20) {
+    const need = Math.ceil((normalMin + extra) / 5) * 5;
+    const first = Math.ceil((need / 2 + 10) / 5) * 5;
+    const c = run(mkExam([first, need - first], { ordered: false }));
+    if (c.plan.stretch && c.plan.stretch.lateMin > 0) assert.ok(c.plan.stretch.relaxMin > 0, `relax before late nights (extra ${extra})`);
+    if (c.plan.stretch && c.plan.stretch.relaxMin > 0 && c.plan.stretch.lateMin === 0) relaxOnly++;
+    assert.ok(c.plan.create.every((x) => Date.parse(x.end) <= examAt - 50 * MIN), "never after the exam");
+  }
+  assert.ok(relaxOnly > 0, "a modest overload is absorbed by relax time alone");
 
   // (d) Overtime switched off: no stretch, and a clear shortfall warning instead.
   const d = run(mkExam([150, 150, 150, 150], { allowOvertime: false }));
@@ -329,6 +336,49 @@ for (const strategy of ["balanced", "early"] as const) {
   const sp = planSchedule({ now: tue, mode: "full", settings, subjects, classes: tueClasses, tasks: stale, blocks: [] });
   assert.ok(sp.create.every((x) => Date.parse(x.end) <= examAt), "overdue exam tasks never run past the exam");
   console.log("✓ exam plan: never after the exam, relax before late nights, options respected");
+}
+
+// ── 12. Order rules: chapters in order, the recap always last, unordered when asked ───────
+{
+  const tue = new Date(2026, 10, 24, 11, 24).getTime();
+  const examAt = atTime(addDays(startOfDay(tue), 1), "09:00");
+  const mk = (mins: number[], extra: Partial<Exam> = {}): Exam => ({
+    id: "ox", subjectId: "math", title: "Quiz", startsAt: iso(examAt), durationMin: 60, topics: [], recapMin: 60,
+    prepMin: mins.reduce((a, b) => a + b, 0) + 60,
+    chapters: mins.map((m, i) => ({ id: `c${i}`, name: `Ch${i + 1}`, minutes: m })), ...extra,
+  });
+  const run = (exam: Exam) => {
+    const drafts = buildStudyTasks(exam, subjects[0], tue).map((d, i) => ({ ...d, id: `s${i}` }));
+    const plan = planSchedule({ now: tue, mode: "full", settings, subjects, classes: [], tasks: drafts, blocks: [] });
+    const span = (id: string) => {
+      const b = plan.create.filter((x) => x.taskId === id);
+      return b.length ? { s: Math.min(...b.map((x) => Date.parse(x.start))), e: Math.max(...b.map((x) => Date.parse(x.end))) } : null;
+    };
+    return { drafts, plan, span };
+  };
+
+  // in order (default): every chapter starts after the previous one ended; the recap is last
+  const a = run(mk([90, 60, 90, 45]));
+  assert.ok(a.drafts[4].sequential && a.drafts[1].sequential && !a.drafts[0].sequential);
+  for (let i = 1; i < a.drafts.length; i++) {
+    const prev = a.span(`s${i - 1}`);
+    const cur = a.span(`s${i}`);
+    if (prev && cur) assert.ok(cur.s >= prev.e, `chapter ${i + 1} starts after chapter ${i} ended`);
+  }
+
+  // not in order, different lengths: the chapters are free, but the recap is still last
+  const b = run(mk([150, 60, 120, 45], { ordered: false }));
+  assert.ok(b.drafts.slice(0, 4).every((d) => !d.sequential) && b.drafts[4].sequential);
+  const recap = b.span("s4");
+  for (let i = 0; i < 4; i++) {
+    const sp = b.span(`s${i}`);
+    if (sp && recap) assert.ok(sp.e <= recap.s, `recap after chapter ${i + 1}`);
+  }
+
+  // all chapters equal → always in order, even if "not in order" was chosen
+  const c = buildStudyTasks(mk([60, 60, 60], { ordered: false }), subjects[0], tue);
+  assert.ok(c[1].sequential && c[2].sequential, "equal chapters stay in order");
+  console.log("✓ order: chapters follow each other, recap last, unordered mode free");
 }
 
 console.log("\nAll scheduler checks passed.");

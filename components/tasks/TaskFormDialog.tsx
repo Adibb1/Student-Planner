@@ -128,7 +128,10 @@ export function TaskFormDialog({
   const workedInput = Math.round(Number(draft.worked));
   const dueMs = fromLocalInput(draft.due);
   const pinStartMs = fromDateAndTime(draft.pinDate, draft.pinStart);
-  const pinEndMs = fromDateAndTime(draft.pinDate, draft.pinEnd);
+  // An end time that is not later than the start (e.g. 22:00 to 00:00) means the next day.
+  const pinEndSameDay = fromDateAndTime(draft.pinDate, draft.pinEnd);
+  const pinOvernight = Number.isFinite(pinEndSameDay) && draft.pinEnd !== draft.pinStart && pinEndSameDay <= pinStartMs;
+  const pinEndMs = pinOvernight ? pinEndSameDay + 24 * HOUR : pinEndSameDay;
   const pinValid = !draft.pin || (pinEndMs > pinStartMs && pinStartMs > now);
   const workedValid = !task || (Number.isFinite(workedInput) && workedInput >= 0);
   const valid = draft.title.trim().length > 0 && total >= 5 && Number.isFinite(dueMs) && pinValid && workedValid;
@@ -416,6 +419,11 @@ export function TaskFormDialog({
                   automatically. Earlier fixed times are replaced if together they would be more than the time left.
                 </Text>
               </HStack>
+              {pinOvernight && pinValid && (
+                <Text fontSize="xs" color="fg.muted">
+                  Ends the next day ({new Date(pinEndMs).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })}).
+                </Text>
+              )}
               {!pinValid && (
                 <Text fontSize="sm" color="red.500">
                   Choose a start in the future and an end after the start.

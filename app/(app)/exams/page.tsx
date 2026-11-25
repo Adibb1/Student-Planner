@@ -25,10 +25,19 @@ import { usePlanner } from "@/context/PlannerContext";
 import { formatDurationShort, parseDuration } from "@/lib/duration";
 import { countdown, fmtDateTime, fmtDuration, fromLocalInput, toLocalInput } from "@/lib/format";
 import { toastPlan } from "@/lib/notify";
-import { HOUR, addDays, atTime, examChapters, startOfDay } from "@/lib/scheduler";
+import { HOUR, addDays, atTime, chaptersAllEqual, examChapters, examIsOrdered, startOfDay, studyTaskTitle } from "@/lib/scheduler";
 import type { Exam } from "@/lib/types";
 
 type ChapterRow = { key: string; name: string; time: string };
+
+/** What decides the study plan. If any of these change, the sessions may need to be re-planned. */
+const planKey = (e: Omit<Exam, "id">) => {
+  const { chapters, recapMin } = examChapters(e);
+  return JSON.stringify([
+    e.startsAt, e.subjectId, chapters.map((c) => [c.id, c.name, c.minutes]), recapMin,
+    e.startFrom ?? null, e.finishBy ?? null, e.window ?? null, e.allowOvertime !== false, examIsOrdered(e),
+  ]);
+};
 
 type Draft = {
   id?: string;
@@ -46,11 +55,12 @@ type Draft = {
   winStart: string;
   winEnd: string;
   allowOvertime: boolean;
+  ordered: boolean;
   makePlan: boolean;
 };
 
 let rowCounter = 0;
-const newRow = (name = "", time = ""): ChapterRow => ({ key: `row-${Date.now()}-${rowCounter++}`, name, time });
+const newRow = (name = "", time = "", key?: string): ChapterRow => ({ key: key || `row-${Date.now()}-${rowCounter++}`, name, time });
 
 const blank = (now: number, subjectId = ""): Draft => ({
   title: "",
@@ -67,6 +77,7 @@ const blank = (now: number, subjectId = ""): Draft => ({
   winStart: "08:00",
   winEnd: "12:00",
   allowOvertime: true,
+  ordered: true,
   makePlan: true,
 });
 
@@ -100,6 +111,7 @@ function draftToExam(d: Draft): Omit<Exam, "id"> | null {
     finishBy: Number.isFinite(finishBy) ? new Date(finishBy).toISOString() : null,
     window: d.windowOn && d.winStart && d.winEnd ? { start: d.winStart, end: d.winEnd } : null,
     allowOvertime: d.allowOvertime,
+    ordered: d.ordered,
   };
 }
 
@@ -123,14 +135,27 @@ export default function ExamsPage() {
   const past = exams.filter((e) => Date.parse(e.startsAt) <= now).sort((a, b) => Date.parse(b.startsAt) - Date.parse(a.startsAt));
 
   const valid = !!parsed;
+  const equalTimes = !!draft && chaptersAllEqual(draft.chapters.map((r) => ({ minutes: parseDuration(r.time) ?? 0 })).filter((c) => c.minutes > 0)) && draft.chapters.every((r) => parseDuration(r.time) !== null);
   const draftHasPlan = !!draft?.id && tasks.some((t) => t.examId === draft.id);
 
   const save = () => {
     if (!draft || !parsed) return;
     const data = parsed;
     if (draft.id) {
-      // Editing: the existing plan is rebuilt automatically (so old sessions never stay behind).
-      updateExam(draft.id, data);
+      const old = exams.find((e) => e.id === draft.id);
+      if (draftHasPlan && old && planKey(old) !== planKey(data)) {
+        // Something that shapes the plan changed: ask, never move sessions behind the user's back.
+        const dateMoved = old.startsAt !== data.startsAt;
+        const replan = confirm(
+          `You changed things that affect your study plan${dateMoved ? " (including the exam date or time)" : ""}.\n\n` +
+            "OK = re-plan the study sessions now. Chapters you already finished are not touched.\n" +
+            "Cancel = just save the exam and keep the sessions as they are." +
+            (dateMoved ? "\n\nBecause the date or time changed, re-planning is recommended." : ""),
+        );
+        updateExam(draft.id, data, { replan });
+      } else {
+        updateExam(draft.id, data);
+      }
       if (!draftHasPlan && draft.makePlan) {
         toastPlan(generateStudyPlan(draft.id, { ...data, id: draft.id }).plan, "Study plan created");
       }
@@ -150,7 +175,7 @@ export default function ExamsPage() {
       startsAt: toLocalInput(starts),
       durationMin: e.durationMin,
       venue: e.venue || "",
-      chapters: chapters.map((c) => newRow(c.name, formatDurationShort(c.minutes))),
+      chapters: chapters.map((c) => newRow(c.name, formatDurationShort(c.minutes), c.id)),
       bulk: "",
       recap: recapMin > 0 ? formatDurationShort(recapMin) : "0",
       startFrom: e.startFrom ? toLocalInput(Date.parse(e.startFrom)) : "",
@@ -159,6 +184,7 @@ export default function ExamsPage() {
       winStart: e.window?.start || "08:00",
       winEnd: e.window?.end || "12:00",
       allowOvertime: e.allowOvertime !== false,
+      ordered: e.ordered !== false,
       makePlan: tasks.some((t) => t.examId === e.id),
     });
     setShowSessions(false);
@@ -374,6 +400,12 @@ export default function ExamsPage() {
               <Stack gap={2} w="full">
                 {draft.chapters.map((row, i) => {
                   const bad = row.time.trim() !== "" && parseDuration(row.time) === null;
+                  const finished = !!draft.id && tasks.some(
+                    (t) =>
+                      t.examId === draft.id &&
+                      t.status === "done" &&
+                      (t.chapterId ? t.chapterId === row.key : t.title === studyTaskTitle({ title: draft.title }, getSubject(draft.subjectId || null), row.name.trim())),
+                  );
                   const update = (patch: Partial<ChapterRow>) =>
                     setDraft({ ...draft, chapters: draft.chapters.map((r, j) => (j === i ? { ...r, ...patch } : r)) });
                   const move = (to: number) => {
@@ -385,8 +417,14 @@ export default function ExamsPage() {
                   };
                   return (
                     <HStack key={row.key} gap={2}>
-                      <Input flex="1" minW={0} value={row.name} placeholder={`Chapter ${i + 1}`} aria-label={`Chapter ${i + 1} name`} onChange={(e) => update({ name: e.target.value })} />
-                      <Input w="24" value={row.time} placeholder="e.g. 45m" aria-label={`Chapter ${i + 1} time`} borderColor={bad ? "red.500" : undefined} onChange={(e) => update({ time: e.target.value })} />
+                      <Input flex="1" minW={0} value={row.name} placeholder={`Chapter ${i + 1}`} aria-label={`Chapter ${i + 1} name`} disabled={finished} onChange={(e) => update({ name: e.target.value })} />
+                      {finished ? (
+                        <Badge colorPalette="green" variant="subtle" w="24" justifyContent="center" py={2.5}>
+                          Done
+                        </Badge>
+                      ) : (
+                        <Input w="24" value={row.time} placeholder="e.g. 45m" aria-label={`Chapter ${i + 1} time`} borderColor={bad ? "red.500" : undefined} onChange={(e) => update({ time: e.target.value })} />
+                      )}
                       <IconButton type="button" size="xs" variant="ghost" aria-label="Move up" disabled={i === 0} onClick={() => move(i - 1)}>
                         <LuArrowUp />
                       </IconButton>
@@ -430,6 +468,26 @@ export default function ExamsPage() {
                   </Button>
                 </HStack>
               </Stack>
+            </Stack>
+
+            <Stack gap={1}>
+              <Switch.Root
+                colorPalette="teal"
+                checked={draft.ordered || equalTimes}
+                disabled={equalTimes}
+                onCheckedChange={(e) => setDraft({ ...draft, ordered: e.checked })}
+              >
+                <Switch.HiddenInput />
+                <Switch.Control />
+                <Switch.Label>Study the chapters in this order</Switch.Label>
+              </Switch.Root>
+              <Text fontSize="xs" color="fg.muted">
+                {equalTimes
+                  ? "All chapters have the same time, so they are always studied in order."
+                  : draft.ordered
+                    ? "Each chapter starts after the one above it is finished."
+                    : "Chapters are placed wherever they fit your timetable best. The final recap still comes last."}
+              </Text>
             </Stack>
 
             <FormField label="Final recap / past papers (optional)" hint="Kept for the end of the plan. Type 0 for none.">
@@ -523,7 +581,7 @@ export default function ExamsPage() {
             )}
             {draft.id && draftHasPlan && (
               <Text fontSize="xs" color="fg.muted">
-                Saving updates the study plan automatically. Time you already worked is kept.
+                If you change chapters, times or options, you will be asked before the study sessions are re-planned. Finished chapters are never rescheduled.
               </Text>
             )}
           </Stack>

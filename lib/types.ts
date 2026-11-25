@@ -69,6 +69,13 @@ export type Task = {
   window?: TimeWindow | null;
   /** Allow using relax time and late nights when the work does not fit otherwise. */
   allowOvertime?: boolean;
+  /** Exam study plans: which chapter this task is (so edits keep finished chapters). */
+  chapterId?: string | null;
+  /** Tasks with the same group (an exam id) are ordered by `orderIndex`. */
+  orderGroup?: string | null;
+  orderIndex?: number;
+  /** Must start after every earlier task of the group has finished (chapters in order, the final recap). */
+  sequential?: boolean;
   createdAt: string;
   completedAt?: string | null;
 };
@@ -115,6 +122,8 @@ export type Exam = {
   window?: TimeWindow | null;
   /** If it does not fit, use relax time and late nights (never after the exam). Default: on. */
   allowOvertime?: boolean;
+  /** Study the chapters one after another, in the order listed. Default: on. */
+  ordered?: boolean;
 };
 
 export type RoutineKind = "prayer" | "meal" | "bath" | "relax" | "other";

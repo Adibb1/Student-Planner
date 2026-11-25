@@ -17,7 +17,7 @@ import {
 } from "./time";
 
 /** A free stretch of time. `subjectId` is set when you reserved it for one subject. */
-export type FreeSlot = Interval & { subjectId: string | null };
+export type FreeSlot = Interval & { subjectId: string | null; /** Emergency time promoted to a normal slot (relax time / late night). */ stretch?: "relax" | "late" };
 
 /** The day's waking window (wake → bed). Bed may be after midnight. */
 export function dayWindow(dayStart: number, settings: Pick<Settings, "wake" | "bed">): Interval {
