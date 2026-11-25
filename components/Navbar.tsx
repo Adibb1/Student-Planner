@@ -9,15 +9,17 @@ import {
   Flex,
   HStack,
   IconButton,
+  Menu,
+  Portal,
   Stack,
   Text,
 } from "@chakra-ui/react";
 import NextLink from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { LuLogOut, LuMenu, LuTimer, LuX } from "react-icons/lu";
+import { LuBookOpen, LuLogOut, LuMenu, LuSettings, LuTimer, LuX } from "react-icons/lu";
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { nav, site } from "@/config/site";
+import { nav, profileNav, site } from "@/config/site";
 import { useAuth } from "@/context/AuthContext";
 import { formatClock, useFocus } from "@/context/FocusContext";
 import { usePlanner } from "@/context/PlannerContext";
@@ -127,21 +129,45 @@ export function Navbar() {
 
             <ThemeToggle />
 
-            <IconButton
-              aria-label="Sign out"
-              variant="ghost"
-              size="md"
-              display={{ base: "none", sm: "inline-flex" }}
-              onClick={() => signOut()}
-              title={user?.email ? `Sign out (${user.email})` : "Sign out"}
-            >
-              <LuLogOut />
-            </IconButton>
-
-            <Avatar.Root size="xs" ml={1} display={{ base: "none", sm: "inline-flex" }}>
-              <Avatar.Fallback name={user?.displayName || user?.email || "You"} />
-              {user?.photoURL && <Avatar.Image src={user.photoURL} alt="" referrerPolicy="no-referrer" />}
-            </Avatar.Root>
+            {/* Profile menu: Subjects, Settings and Sign out */}
+            <Menu.Root positioning={{ placement: "bottom-end" }}>
+              <Menu.Trigger asChild>
+                <IconButton aria-label="Open profile menu" variant="ghost" size="md" rounded="full" ml={1}>
+                  <Avatar.Root size="xs">
+                    <Avatar.Fallback name={user?.displayName || user?.email || "You"} />
+                    {user?.photoURL && <Avatar.Image src={user.photoURL} alt="" referrerPolicy="no-referrer" />}
+                  </Avatar.Root>
+                </IconButton>
+              </Menu.Trigger>
+              <Portal>
+                <Menu.Positioner>
+                  <Menu.Content minW="56">
+                    <Box px={3} py={2} borderBottomWidth="1px" borderColor="border" mb={1}>
+                      <Text fontWeight="semibold" fontSize="sm" truncate>
+                        {user?.displayName || "You"}
+                      </Text>
+                      {user?.email && (
+                        <Text fontSize="xs" color="fg.muted" truncate>
+                          {user.email}
+                        </Text>
+                      )}
+                    </Box>
+                    {profileNav.map((n) => (
+                      <Menu.Item key={n.href} value={n.href} asChild>
+                        <NextLink href={n.href}>
+                          {n.href === "/settings" ? <LuSettings /> : <LuBookOpen />}
+                          {n.label}
+                        </NextLink>
+                      </Menu.Item>
+                    ))}
+                    <Menu.Separator />
+                    <Menu.Item value="sign-out" color="fg.error" onClick={() => signOut()}>
+                      <LuLogOut /> Sign out
+                    </Menu.Item>
+                  </Menu.Content>
+                </Menu.Positioner>
+              </Portal>
+            </Menu.Root>
 
             {/* Menu button: phones and tablets */}
             <IconButton
@@ -176,9 +202,6 @@ export function Navbar() {
                   </NextLink>
                 </Button>
               ))}
-              <Button variant="outline" size="lg" justifyContent="flex-start" onClick={() => signOut()}>
-                <LuLogOut /> Sign out
-              </Button>
             </Stack>
           </Box>
         )}
